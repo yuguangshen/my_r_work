@@ -1,0 +1,645 @@
+---
+title: "MGT 6090 Assignment 5 Part 1: MSF dataset"
+author: "Yuguang Shen"
+date: "September 28, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(corrplot)
+library(data.table)
+library(patchwork)
+library(gt)
+library(knitr)
+library(RColorBrewer)
+
+```
+
+# Useful Functions
+
+```{r}
+
+# Function to calculate n, mean, sd, ect
+
+get_stats <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_n" = ~n(),
+                        "_mean" = ~mean(., na.rm = TRUE), 
+                        "_sd" = ~sd(., na.rm = TRUE),
+                        "_skew" = ~skewness(., na.rm = TRUE),
+                        "_kurt" = ~kurtosis(., na.rm = TRUE),
+                        "_min" = ~min(., na.rm = TRUE),
+                        "_max" = ~max(., na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "n, mean, sd, skewness, kurtosis, min, max") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean:max, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  
+  return (stats_table)
+  
+  
+}
+
+# Function to calculate percentile
+
+get_percentiles <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_P1" = ~quantile(.,0.01, na.rm = TRUE),
+                        "_P5" = ~quantile(.,0.05, na.rm = TRUE),
+                        "_P25" = ~quantile(.,0.25, na.rm = TRUE),
+                        "_P50" = ~quantile(.,0.5, na.rm = TRUE),
+                        "_P75" = ~quantile(.,0.75, na.rm = TRUE),
+                        "_P95" = ~quantile(.,0.95, na.rm = TRUE),
+                        "_P99" = ~quantile(.,0.99, na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "percentiles") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = P1:P99, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  
+  return (stats_table)
+  
+  
+}
+
+```
+
+# Using MSF dataset
+
+## 1. Load msf file
+
+```{r, message=FALSE, warning=FALSE}
+
+msf <-
+  read_csv("msf_new2.csv", guess_max = 5000) %>%
+  select(PERMNO, DATE, SHRCD, HEXCD, HSICCD, PRC, ALTPRC, RET, SHROUT, VWRETD) %>%
+  filter(SHRCD %in% c(10, 11)) %>%
+  clean_names() %>%
+  mutate(date = ymd(date),
+         prc = abs(prc),
+         altprc = abs(altprc),
+         ret = as.numeric(ret)
+         ) %>%
+  mutate(prc = case_when(is.na(prc) & !is.na(altprc) ~ altprc,
+                         TRUE ~ prc))
+  
+```
+
+## 2. Calculate Market Cap (in millions)
+
+```{r, message=FALSE, warning=FALSE}
+
+msf <-
+  msf %>%
+  mutate(mktcap = prc * shrout * 1000 / 1000000) %>%
+  mutate(date = ceiling_date(date, "months") - 1)
+
+```
+
+## 2. Adjust Market Cap for CPI
+
+```{r, message=FALSE, warning=FALSE}
+
+# Load CPI data
+
+cpi <-
+    "CPIAUCNS" %>%
+  tq_get(get = "economic.data", from = "1913-01-01") %>%
+  rename("fred_code" = "symbol", "monthly_cpi" = "price") %>%
+  select(-fred_code) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = ceiling_date(date, "months") - 1)
+
+# Calculate average CPI for 2010
+
+cpi_2010 <-
+  cpi %>%
+   filter(date >= "2010-01-31" & date <= "2010-12-31") %>%
+   select(monthly_cpi) %>%
+   colMeans()
+
+# Merge CPI data with msf and adjust cpi based on 2010 level
+
+msf <-
+ left_join(msf, cpi, by = c("date" = "date")) 
+
+msf <- 
+  msf %>%
+  mutate(monthly_cpi = monthly_cpi / cpi_2010 * 100)
+
+# Adjust Market Cap to 2010 dollar
+
+msf <-
+  msf %>%
+  mutate(mktcap_as_2010 = mktcap * 100 / monthly_cpi)
+
+```
+
+## 3. Label the Exchange and Industry for each entry
+
+```{r, message=FALSE, warning=FALSE}
+
+msf <-
+msf %>%
+  mutate(hexcd = case_when(hexcd == 1 ~ "NYSE",
+                           hexcd == 2 ~ "NYSE MKT",
+                           hexcd == 3 ~ "NASDAQ",
+                           hexcd == 4 ~ "Arca",
+                           TRUE ~ "Other")) %>%
+  mutate(industry = case_when(hsiccd %in% c(1:999) ~ "Agricu,Forestry,Fishing",
+                              hsiccd %in% c(1000:1499) ~ "Mining",
+                              hsiccd %in% c(1500:1799) ~ "Construc",
+                              hsiccd %in% c(2000:3999) ~ "Mfg",
+                              hsiccd %in% c(4000:4999) ~ "Transp,other Util",
+                              hsiccd %in% c(5000:5199) ~ "Wholesale",
+                              hsiccd %in% c(5200:5999) ~ "Retail",
+                              hsiccd %in% c(6000:6799) ~ "Fin,Insur,Real Est",
+                              hsiccd %in% c(7000:8999) ~ "Services",
+                              TRUE ~ "Public Admin")) 
+
+```
+
+## 4. Plot Market Cap, monthly, with respect to Exchange
+
+```{r, message=FALSE, warning=FALSE}
+
+options(scipen = 999)
+
+msf %>%
+  group_by(date, hexcd) %>%
+  summarise(across(mktcap_as_2010, list("sum" = ~sum(., na.rm = TRUE)))) %>%
+                                        
+  ggplot(aes(x = date, y = mktcap_as_2010_sum / 1000 )) +
+  geom_line(aes(color = hexcd)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Monthly Market Cap by Exchange",
+       x = "Date",
+       y = "Mkt Cap in 2010 Dollar (millions)",
+       color = "Exchange")
+
+# Plot Market Cap in log10 scale 
+
+msf %>%
+  group_by(date, hexcd) %>%
+  summarise(across(mktcap_as_2010, list("n" = ~n(),
+                                        "sum" = ~sum(., na.rm = TRUE)))) %>%
+  ggplot(aes(x = date, y = mktcap_as_2010_sum / 1000 )) +
+  geom_line(aes(color = hexcd)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Monthly Market Cap by Exchange, log10 scale",
+       x = "Date",
+       y = "Mkt Cap in 2010 Dollar (millions)-log10",
+       color = "Exchange") +
+  scale_y_log10()
+
+```
+
+## 5. Plot number of stocks, monthly, with respect to Exchange
+
+```{r, message=FALSE, warning=FALSE}
+
+options(scipen = 999)
+
+msf %>%
+  group_by(date, hexcd) %>%
+  summarise(across(mktcap_as_2010, list("n" = ~n(),
+                                 "sum" = ~sum(., na.rm = TRUE)))) %>%
+  ggplot(aes(x = date, y = mktcap_as_2010_n)) +
+  geom_line(aes(color = hexcd)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Monthly Number of Stocks by Exchange",
+       x = "Date",
+       y = "Number of Stocks",
+       color = "Exchange")
+
+# Plot Number of Stocks in log10 scale
+
+msf %>%
+  group_by(date, hexcd) %>%
+  summarise(across(mktcap_as_2010, list("n" = ~n(),
+                                 "sum" = ~sum(., na.rm = TRUE)))) %>%
+  ggplot(aes(x = date, y = mktcap_as_2010_n)) +
+  geom_line(aes(color = hexcd)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Monthly Number of Stocks by Exchange, log10 scale",
+       x = "Date",
+       y = "Number of Stocks-log10",
+       color = "Exchange") +
+  scale_y_log10()
+
+```
+
+## 6. Plot Market Cap, monthly, with respect to Industries
+
+```{r, message=FALSE, warning=FALSE}
+
+options(scipen = 999)
+
+msf %>%
+  group_by(date, industry) %>%
+  summarise(across(mktcap_as_2010, list("sum" = ~sum(., na.rm = TRUE)))) %>%
+  ggplot(aes(x = date, y = mktcap_as_2010_sum / 1000)) +
+  geom_line(aes(color = industry)) +
+  scale_color_brewer(palette = "Paired") +
+  labs(title = "Monthly Market Cap by Industry",
+       x = "Date",
+       y = "Mkt Cap in 2010 Dollar (millions)",
+       color = "Industry") 
+
+
+```
+
+## 7. Plot number of stocks, monthly, with respect to industry
+
+```{r, message=FALSE, warning=FALSE}
+
+msf %>%
+  
+  group_by(date, industry) %>%
+  summarise(across(mktcap_as_2010, list("n" = ~n()))) %>%
+  ggplot(aes(x = date, y = mktcap_as_2010_n)) +
+  geom_line(aes(color = industry)) +
+  scale_color_brewer(palette = "Paired") +
+  labs(title = "Monthly Number of Stocks by Industry",
+       x = "Date",
+       y = "Number of Stocks",
+       color = "Industry") 
+
+
+```
+
+## 8. Compute Excess return over Risk Free rate
+
+```{r, message=FALSE, warning=FALSE}
+
+rf_monthly <-
+  read_csv("F-F_Research_Data_Factors.csv", skip = 3) %>%
+  rename("date" = "X1") %>%
+  filter(date > 2020) %>%
+  mutate(date = ymd(paste(date, "01"))) %>%
+  mutate(date = ceiling_date(date, "months") - 1) %>%
+  clean_names() %>%
+  select(date, rf)
+
+```
+
+
+
+```{r}
+
+msf <-
+  left_join(msf, rf_monthly, by = c("date" = "date")) 
+
+msf <-
+  msf %>%
+  mutate(ret_rf = ret - rf / 100)
+
+```
+
+
+```{r}
+
+# Descriptive stats for 1925~2020
+
+msf %>%
+  get_stats(NULL, "ret_rf")
+
+msf %>%
+  get_percentiles(NULL, "ret_rf")
+
+```
+
+```{r}
+
+# Descriptive ststs for 1963~2020
+
+msf %>%
+  filter(date >= "1963-01-31") %>%
+  get_stats(NULL, "ret_rf")
+
+msf %>%
+  filter(date >= "1963-01-31") %>%
+  get_percentiles(NULL, "ret_rf")
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+ret_rf_stats_table <-
+  msf %>%
+  get_stats("date", "ret_rf")
+
+ret_rf_stats_table$`_data` %>%
+  select("date", "mean", "sd") %>% 
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) + 
+  geom_line() +
+  labs(title = "Monthly Mean and Sd of Excess Return over Risk Free Rate")
+
+
+
+```
+
+## 9. Calculate excess return over MKT
+
+```{r}
+
+msf <-
+  
+msf %>%
+  mutate(ret_mkt = ret - vwretd,
+         ret_mkt_log = log(1 + ret_mkt))
+
+```
+
+```{r}
+
+# Descriptive stats for 1925~2020
+
+msf %>%
+  get_stats(NULL, c("ret_mkt", "ret_mkt_log"))
+
+msf %>%
+  get_percentiles(NULL, c("ret_mkt", "ret_mkt_log"))
+
+```
+
+```{r}
+
+# Descriptive ststs for 1963~2020
+
+msf %>%
+  filter(date >= "1963-01-31") %>%
+  get_stats(NULL, c("ret_mkt", "ret_mkt_log"))
+
+msf %>%
+  filter(date >= "1963-01-31") %>%
+  get_percentiles(NULL, c("ret_mkt", "ret_mkt_log"))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+ret_mkt_stats_table <-
+  msf %>%
+  get_stats("date", "ret_mkt")
+
+ret_mkt_stats_table$`_data` %>%
+  select("date", "mean", "sd") %>% 
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) + 
+  geom_line() +
+  labs(title = "Monthly Mean and Sd of Excess Return over Mkt Portfolio")
+
+ret_mkt_log_stats_table <-
+  msf %>%
+  get_stats("date", "ret_mkt_log")
+
+ret_mkt_log_stats_table$`_data` %>%
+  select("date", "mean", "sd") %>% 
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) + 
+  geom_line() +
+  labs(title = "Monthly Mean and Sd of Excess Log Return over Mkt Portfolio")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,828 @@
+---
+title: "MGT 6090 Assignment 4"
+author: "Yuguang Shen"
+date: "September 18, 2021"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+# 1. My approach: How I pre-processed funda data
+
+First, I used SAS on QCF Server to select all the variables required in Assignment Excel tables and filtered them using fiscal year.
+
+Second, the resulting dataset was saved on my remote P drive as a csv file. At that moment the file size was reduced from >6G to about 90M. 
+
+Finally, the csv file was downloaded to my laptop and ready for this project.
+
+# 2. Load packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(dev = 'pdf')
+```
+
+```{r, warning=FALSE,message=FALSE,error=FALSE}
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(haven)
+library(janitor)
+library(corrplot)
+library(data.table)
+library(patchwork)
+library(gt)
+library(gridExtra)
+library(knitr)
+
+```
+
+# 3. Load Dataset and Pre-processing
+
+## 3.1 Load Dataset
+
+```{r, warning=FALSE,message=FALSE,error=FALSE}
+
+# Define the file path for the reduced csv file
+
+file_path <- "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 4/funda_reduced.csv"
+
+# Load the reduced csv file and remove observations according to the assignment requirment.
+
+funda_clean <- 
+  read_csv(file_path) %>%
+  replace_na(list(sich = 0, compst = "unknown")) %>%
+  filter(compst != "AB") %>%
+  filter(!((sich > 5999 & sich < 7000) | (sich > 4899 & sich < 5000))) %>%
+  filter(scf == 1 | scf == 2  | scf == 3 | scf == 7) %>%
+  mutate(datadate = ymd(datadate))
+
+# Replace all NA in financial statement items with 0. This will make future calculation easier.  
+# Otherwise, calculation involving NA will generate NA. 
+
+funda_clean[is.na(funda_clean)] <- 0
+
+```
+
+
+## 3.2 Add NBER Recession flag to the data
+
+### Load NBER Recession data
+
+```{r, warning=FALSE,message=FALSE,error=FALSE}
+
+# Change the date to the end of month, which makes it easier to join with funda data. 
+# The dates on funda are all end of the month.
+
+recession <-
+    "USREC" %>%
+  tq_get(get = "economic.data", from = "1970-01-01") %>%
+  rename("fred_code" = "symbol", "recession" = "price") %>%
+  select(-fred_code) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = ceiling_date(date, "months") - 1)
+  
+
+```
+
+### Add recession flag to every observation
+
+```{r}
+
+funda_clean <-
+  
+left_join(funda_clean, recession, by = c("datadate" = "date")) %>%
+  relocate(recession, .after = datadate)
+
+```
+
+
+## 3.3 Use GDP Deflator to adjust data
+
+### Get Deflator data from FRED and create annual Deflator data by taking average of quarterly data.
+
+```{r, warning=FALSE,message=FALSE,error=FALSE}
+
+# Data since 1970 is sufficient for this project
+
+deflator <-
+  "GDPDEF" %>%
+  tq_get(get = "economic.data", from = "1970-01-01") %>%
+  rename("fred_code" = "symbol", "quarter_deflator" = "price") %>%
+  select(-fred_code)
+
+annual_deflator <-
+deflator %>%
+  mutate(date = ymd(date), year = lubridate::year(date)) %>%
+  group_by(year) %>%
+  summarise(annual_deflator = mean(quarter_deflator))
+
+```
+
+### Add annual_deflator column to the dataset
+
+```{r}
+
+# Add a annual_deflator by left-join by date
+
+funda_clean <-
+  
+left_join(funda_clean, annual_deflator, by = c("fyear" = "year")) %>%
+  relocate(annual_deflator, .after = fyear)
+
+```
+
+### Adjust all items in funda_clean to 2012 dollar 
+
+Deflator Formula:
+
+adjusted value = original value * (100 / annual_deflator)
+
+```{r}
+
+funda_clean <-
+  
+funda_clean %>%
+  mutate(across(ch : mkvalt, ~ .*100/annual_deflator))
+
+```
+
+
+# 4. Calculate financial variables and ratios 
+
+According to Assignment Excel table 2, table 9 and table 10, I am adding more variables. See below for their full names and corresponding short names in this project.
+
+
+Investments : iv
+
+Change Wroking Capital : cwc
+
+Internal Cash Flow : icf
+
+Financial Deficit : fd
+
+Net Debt Issues : ndi
+
+Net Equity Issues : nei
+
+Net External Financing : nef
+
+Net Assets : na
+
+Book Value of Debt : bvd
+
+Log Sale : sls
+
+Book Leverage : lev
+
+Tangibility : tng
+
+Profitability : prof
+
+Market Value Assets / Book Value Assets : mbk
+
+Cash Dividend / Net Assets : dv_na (rename to div)
+
+Investments / Net Assets : iv_na (rename to x)
+
+Change Working Capital / Net Assets : cwc_na (rename to dwc)
+
+Internal Cash Flow / Net Assets : icf_na (rename to cf)
+
+Financing Deficit / Net Assets : fd_na (rename to def)
+
+Gross Debt Issued / Net Assets : dltis_na (rename to gd)
+
+Net Debt Issued / Net Assets : ndi_na (rename to nd)
+
+Net Equity Issued / Net Assets : nei_na (rename to ne)
+
+Net External Financing / Net Assets : nef_na (rename to nt)
+
+
+
+```{r}
+
+funda_clean <-
+funda_clean %>%
+  mutate(iv = case_when(scf == 7 ~ capx + ivch + aqc - sppe - siv - ivstch - ivaco,
+                        TRUE ~ capx + ivch + aqc + fuseo - sppe - siv)) %>%
+  mutate(cwc = case_when(scf == 1 ~ wcapc + chech + dlcch,
+                         scf == 7 ~ -recch - invch - apalch - txach - aoloch + chech - fiao - dlcch,
+                         TRUE ~ -wcapc + chech - dlcch)) %>%
+  mutate(icf = case_when(scf == 7 ~ ibc + xidoc + dpc + txdc + esubc + sppiv + fopo + exre,
+                         TRUE ~ ibc + xidoc + dpc + txdc + esubc + sppiv + fopo + fsrco)) %>%
+  mutate(fd = dv + iv + cwc - icf) %>%
+  mutate(ndi = dltis - dltr) %>%
+  mutate(nei = sstk - prstkc) %>%
+  mutate(nef = ndi + nei) %>%
+  mutate(na = at - lct) %>%
+  mutate(sls = case_when(sale > 0 ~ log(sale),
+                         TRUE ~ 0)) %>%
+  mutate(bvd = dlc + dltt) %>%
+  mutate(lev = bvd / (bvd + seq)) %>%
+  mutate(tng = ppent / at) %>%
+  mutate(prof = ni / at) %>%
+  mutate(mbk = mkvalt / at) %>%
+  mutate(across(c(dv, iv, cwc, icf, fd, dltis, ndi, nei, nef), ~ ./na, .names = "{.col}_na")) %>%
+  mutate(cr = act / lct, 
+         qr = (che + rect) / lct, 
+         d_e = lt / teq, 
+         dso = (rect / sale)*365, 
+         dio = (invt/cogs)*365, 
+         dpo = (ap/cogs)*365, 
+         ccc = dso+dio+dpo, 
+         tat = sale/at, 
+         it = cogs/invt, 
+         rt = sale / rect, 
+         ibd = (oiadp-xint)/oiadp, 
+         icg = oiadp/xint, 
+         lvg = at/teq) %>%
+  mutate(o_score = -1.32 - 0.407*log(at) + 6.03*lt/at - 1.43*(act-lct)/at 
+                   + 0.0757*lct/act - 2.37*ni/at-1.83*(pi+dp)/lt ) %>%
+  mutate(z_score = 1.2*(act-lct)/at + 1.4*re/at + 3.3*oiadp/at 
+                   + 0.6*prcc_f*csho/lt + 0.99*sale/at)
+ 
+
+
+# NAs are generated again due to possible dividing zero. NAs will be replaced by 0.
+
+funda_clean[is.na(funda_clean)] <- 0
+funda_clean[funda_clean == Inf] <-0
+funda_clean[funda_clean == -Inf] <-0
+
+```
+
+
+# 5. Create Dataset for Variables in Table 10 
+
+Extract relavent variables and rename them according to Table 10 in the paper.
+This is the dataset we will work with from now on.
+
+```{r}
+
+funda_ratios <-
+  funda_clean %>%
+  select(datadate, recession, fyear, at, sls, lev:nef_na) %>%
+  rename("div" = "dv_na", "x" = "iv_na", "dwc" = "cwc_na", 
+         "cf" = "icf_na", "def" = "fd_na","gd" = "dltis_na", 
+         "nd" = "ndi_na", "ne" = "nei_na", "nt" = "nef_na")
+
+# NAs and Inf are generated by previous calculation. Set all of them to 0.
+
+funda_ratios[is.na(funda_ratios)] <- 0
+funda_ratios[funda_ratios == Inf] <-0
+funda_ratios[funda_ratios == -Inf] <-0
+
+```
+
+
+# 6. Write functions for Data Analysis and Reporting
+
+## 6.1 Function for descriptive statistics
+
+
+```{r}
+
+# Write a function to calculate descriptive stats
+
+# col_0 is a list containing the columns you want to group by.
+
+# col_1 is a list containing the columns you want to calculate statistics.
+
+get_stats <- function(my_df, col_0, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_n" = ~n(),
+                        "_mean" = ~mean(.), 
+                        "_P25" = ~quantile(.,0.25),
+                        "_P50" = ~quantile(.,0.5),
+                        "_P75" = ~quantile(.,0.75),
+                        "_sd" = ~sd(.),
+                        "_min" = ~min(.),
+                        "_max" = ~max(.)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    # relocate(fyear, .after = var) %>%
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics for Financial Variables",
+               subtitle = all_of(col_0)) %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean:max, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+  
+  
+  return (stats_table)
+  
+  
+}
+
+  
+  # Return a gt object here to make the table easier to read in the fina PDF file.
+
+
+  
+```
+
+
+## 6.2 Function to draw boxplot over fiscal year
+
+```{r}
+
+draw_boxplot <- function(my_df, col_1) {
+  
+  plot_result <-
+    my_df %>%
+    ggplot() +
+    geom_boxplot(aes_string(x = my_df$datadate, y = col_1, group = my_df$fyear)) + 
+    labs(title = paste("The value of ", col_1, " over year"),
+         x = "year") + 
+    scale_x_date(limits = c(as.Date("1970-01-01"), as.Date("2021-12-31")))
+  
+ return (plot_result)
+  
+}
+
+```
+
+
+## 6.3 Function to Plot variable with Moody's BAA-Fed Fund Spread
+
+### Moody's BAA - Fed Fund Spread
+
+```{r}
+
+baa_fed_spread <-
+  "BAAFFM" %>%
+  tq_get(get = "economic.data", from = "1970-01-01") %>%
+  rename("fred_code" = "symbol", "baa_spread" = "price") %>%
+  select(-fred_code) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = ceiling_date(date, "months") - 1)
+
+baa_plot <-
+  baa_fed_spread %>%
+  ggplot() + 
+  geom_line(aes(x = date, y = baa_spread), color = "red") + 
+  labs(title = "Moody's BAA-Fed Fund Spread",
+       x = "Year",
+       y = "Spread") + 
+  scale_x_date(limits = c(as.Date("1970-01-01"), as.Date("2021-12-31"))) + 
+  theme_classic()
+
+  
+
+```
+
+### plot_with_baa(my_df, "col_1")
+
+
+```{r}
+
+plot_with_baa <- function (my_df, col_1) {
+
+ temp <- draw_boxplot(my_df, col_1)
+  
+  result <- (temp) / (baa_plot)
+  
+  return (result)
+   
+}
+
+```
+
+
+## 6.4 Function to Plot variable with Kansas City Financial Stress Index
+
+### Kansas City Financial Stress Index
+A positive value indicates that financial stress is above the long-run average, while a negative value signifies that financial stress is below the long-run average. Another useful way to assess the current level of financial stress is to compare the index to its value during past, widely recognized episodes of financial stress.
+
+```{r}
+
+kc_fin_stress <-
+  "KCFSI" %>%
+  tq_get(get = "economic.data", from = "1990-02-01") %>%
+  rename("fred_code" = "symbol", "kcfsi" = "price") %>%
+  select(-fred_code) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = ceiling_date(date, "months") - 1)
+
+kcfsi_plot <-
+  kc_fin_stress %>%
+  ggplot() + 
+  geom_line(aes(x = date, y = kcfsi), color = "blue") + 
+  labs(title = "Kansas City Financial Stress Index",
+       x = "Year",
+       y = "Index") + 
+  scale_x_date(limits = c(as.Date("1970-01-01"), as.Date("2021-12-31"))) + 
+  theme_classic()
+
+
+```
+
+### plot_with_kcfsi(my_df, "col_1")
+
+```{r}
+
+plot_with_kcfsi <- function (my_df, col_1) {
+  
+  
+  temp <- draw_boxplot(my_df, col_1)
+  
+  result <- (temp) / (kcfsi_plot)
+  
+  return (result)
+  
+}
+
+```
+
+
+
+# 7. Data Analysis and Visualization
+
+## 7.1 Descriptive Statistics grouped by fiscal year
+
+### Stats for All Variables
+
+```{r}
+
+all_col_names <- 
+  funda_clean %>%
+  select(ch:z_score) %>%
+  colnames()
+
+get_stats(funda_clean, "fyear", all_col_names)
+
+
+```
+
+
+### Stats for Variables in Table 10
+
+```{r}
+
+tb10_col_names <-
+  funda_ratios %>%
+  select(sls:nt) %>%
+  colnames()
+
+get_stats(funda_ratios, "fyear", tb10_col_names)
+
+```
+
+
+## 7.2 Correlation of Financial Variables in Table 10
+
+```{r}
+
+funda_ratios %>%
+  select(sls:nt) %>%
+  cor() %>%
+  corrplot(method = "circle",
+           order = "AOE", 
+           title = "Correlation of Financial Variables in Table 10", 
+           number.cex = 0.6,
+           addCoef.col = 'black', 
+           mar=c(0,0,1,0))
+
+```
+
+## 7.3 Descriptive statistics grouped by NBER Recession
+
+### Stats for All Variables
+
+```{r}
+
+get_stats(funda_clean, "recession", all_col_names)
+
+```
+
+### Stats for Variables in Table 10
+
+```{r}
+
+get_stats(funda_ratios, "recession", tb10_col_names)
+
+```
+
+## 7.4 Plot the financial variables over time both by itself and with other data
+
+### Log sale, "sls" for short
+
+```{r}
+
+draw_boxplot(funda_ratios, "sls")
+plot_with_baa(funda_ratios, "sls")
+plot_with_kcfsi(funda_ratios, "sls")
+
+```
+
+### Book Leverage, "lev" for short
+
+```{r}
+
+# NOTE: We have to filter out the extreme high and low values for lev before plotting. 
+
+# Otherwise the boxplots will be squeezed too much by the outliers.
+
+funda_ratios %>%
+  filter(lev > quantile(funda_ratios$lev, 0.05) & lev < quantile(funda_ratios$lev, 0.95) ) %>%
+  draw_boxplot("lev")
+
+funda_ratios %>%
+  filter(lev > quantile(funda_ratios$lev, 0.05) & lev < quantile(funda_ratios$lev, 0.95) ) %>%
+  plot_with_baa("lev")
+
+funda_ratios %>%
+  filter(lev > quantile(funda_ratios$lev, 0.05) & lev < quantile(funda_ratios$lev, 0.95) ) %>%
+  plot_with_kcfsi("lev")
+
+```
+
+### Tangibility, "tng" for short
+
+```{r}
+ 
+draw_boxplot(funda_ratios, "tng")
+plot_with_baa(funda_ratios, "tng")
+plot_with_kcfsi(funda_ratios, "tng")
+
+```
+
+### Profitability, "prof" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(prof > quantile(funda_ratios$prof, 0.3) & prof < quantile(funda_ratios$prof, 0.9) ) %>%
+  draw_boxplot("prof")
+
+funda_ratios %>%
+  filter(prof > quantile(funda_ratios$prof, 0.3) & prof < quantile(funda_ratios$prof, 0.9) ) %>%
+  plot_with_baa("prof")
+
+funda_ratios %>%
+  filter(prof > quantile(funda_ratios$prof, 0.3) & prof < quantile(funda_ratios$prof, 0.9)  ) %>%
+  plot_with_kcfsi("prof")
+```
+
+### Market Value / Book Value of assets, "mbk" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(mbk > quantile(funda_ratios$mbk, 0.1) & mbk < quantile(funda_ratios$mbk, 0.9) ) %>%
+  draw_boxplot("mbk")
+
+funda_ratios %>%
+  filter(mbk > quantile(funda_ratios$mbk, 0.1) & mbk < quantile(funda_ratios$mbk, 0.9) )  %>%
+  plot_with_baa("mbk")
+
+funda_ratios %>%
+  filter(mbk > quantile(funda_ratios$mbk, 0.1) & mbk < quantile(funda_ratios$mbk, 0.9) ) %>%
+  plot_with_kcfsi("mbk")
+
+```
+
+### Divdend / Net assets, "div" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(div > quantile(funda_ratios$div, 0.1) & div < quantile(funda_ratios$div, 0.9) ) %>%
+  draw_boxplot("div")
+
+funda_ratios %>%
+  filter(div > quantile(funda_ratios$div, 0.1) & div < quantile(funda_ratios$div, 0.9) )  %>%
+  plot_with_baa("div")
+
+funda_ratios %>%
+  filter(div > quantile(funda_ratios$div, 0.1) & div < quantile(funda_ratios$div, 0.9) ) %>%
+  plot_with_kcfsi("div")
+
+```
+
+### Investment / Net Asset, "x" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(x > quantile(funda_ratios$x, 0.1) & x < quantile(funda_ratios$x, 0.9) ) %>%
+  draw_boxplot("x")
+
+funda_ratios %>%
+  filter(x > quantile(funda_ratios$x, 0.1) & x < quantile(funda_ratios$x, 0.9) ) %>%
+  plot_with_baa("x")
+
+funda_ratios %>%
+  filter(x > quantile(funda_ratios$x, 0.1) & x < quantile(funda_ratios$x, 0.9) ) %>%
+  plot_with_kcfsi("x")
+
+```
+
+### Change in Working Capital / Net Asset, "dwc" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(dwc > quantile(funda_ratios$dwc, 0.1) & dwc < quantile(funda_ratios$dwc, 0.9) ) %>%
+  draw_boxplot("dwc")
+
+funda_ratios %>%
+  filter(dwc > quantile(funda_ratios$dwc, 0.1) & dwc < quantile(funda_ratios$dwc, 0.9) ) %>%
+  plot_with_baa("dwc")
+
+funda_ratios %>%
+  filter(dwc > quantile(funda_ratios$dwc, 0.1) & dwc < quantile(funda_ratios$dwc, 0.9) ) %>%
+  plot_with_kcfsi("dwc")
+
+```
+
+### Internal Cash Flow / Net Asset, "cf" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(cf > quantile(funda_ratios$cf, 0.1) & cf < quantile(funda_ratios$cf, 0.9) ) %>%
+  draw_boxplot("cf")
+
+funda_ratios %>%
+  filter(cf > quantile(funda_ratios$cf, 0.1) & cf < quantile(funda_ratios$cf, 0.9) ) %>%
+  plot_with_baa("cf")
+
+funda_ratios %>%
+  filter(cf > quantile(funda_ratios$cf, 0.1) & cf < quantile(funda_ratios$cf, 0.9) ) %>%
+  plot_with_kcfsi("cf")
+
+```
+
+
+### Financing Deficit / Net Asset, "def" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(def > quantile(funda_ratios$def, 0.1) & def < quantile(funda_ratios$def, 0.9) ) %>%
+  draw_boxplot("def")
+
+funda_ratios %>%
+  filter(def > quantile(funda_ratios$def, 0.1) & def < quantile(funda_ratios$def, 0.9) ) %>%
+  plot_with_baa("def")
+
+funda_ratios %>%
+  filter(def > quantile(funda_ratios$def, 0.1) & def < quantile(funda_ratios$def, 0.9) ) %>%
+  plot_with_kcfsi("def")
+
+```
+
+### Gross Debt Issue / Net Asset, "gd" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(gd > quantile(funda_ratios$gd, 0.1) & gd < quantile(funda_ratios$gd, 0.9) ) %>%
+  draw_boxplot("gd")
+
+funda_ratios %>%
+  filter(gd > quantile(funda_ratios$gd, 0.1) & gd < quantile(funda_ratios$gd, 0.9) ) %>%
+  plot_with_baa("gd")
+
+funda_ratios %>%
+  filter(gd > quantile(funda_ratios$gd, 0.1) & gd < quantile(funda_ratios$gd, 0.9) ) %>%
+  plot_with_kcfsi("gd")
+
+```
+
+
+
+### Net Debt Issue / Net Asset, "nd" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(nd > quantile(funda_ratios$nd, 0.1) & nd < quantile(funda_ratios$nd, 0.9) ) %>%
+  draw_boxplot("nd")
+
+funda_ratios %>%
+  filter(nd > quantile(funda_ratios$nd, 0.1) & nd < quantile(funda_ratios$nd, 0.9) ) %>%
+  plot_with_baa("nd")
+
+funda_ratios %>%
+  filter(nd > quantile(funda_ratios$nd, 0.1) & nd < quantile(funda_ratios$nd, 0.9) ) %>%
+  plot_with_kcfsi("nd")
+
+```
+
+### Net Equity Issued / Net Asset, "ne" for short
+
+```{r}
+
+funda_ratios %>%
+  filter(ne > quantile(funda_ratios$ne, 0.25) & ne < quantile(funda_ratios$ne, 0.75) ) %>%
+  draw_boxplot("ne")
+
+funda_ratios %>%
+  filter(ne > quantile(funda_ratios$ne, 0.25) & ne < quantile(funda_ratios$ne, 0.75) ) %>%
+  plot_with_baa("ne")
+
+funda_ratios %>%
+  filter(ne > quantile(funda_ratios$ne, 0.25) & ne < quantile(funda_ratios$ne, 0.75) ) %>%
+  plot_with_kcfsi("ne")
+
+```
+
+
+### Net External Financing / Net Asset, "nt" for short
+
+```{r}
+ 
+funda_ratios %>%
+  filter(nt > quantile(funda_ratios$nt, 0.1) & nt < quantile(funda_ratios$nt, 0.9) ) %>%
+  draw_boxplot("nt")
+
+funda_ratios %>%
+  filter(nt > quantile(funda_ratios$nt, 0.1) & nt < quantile(funda_ratios$nt, 0.9) ) %>%
+  plot_with_baa("nt")
+
+funda_ratios %>%
+  filter(nt > quantile(funda_ratios$nt, 0.1) & nt < quantile(funda_ratios$nt, 0.9) ) %>%
+  plot_with_kcfsi("nt")
+
+```
+
+
+## 7.5 Panel analysis over the years
+
+Among the variables in the original dataset, there is no suitable variable to further categorize the observations in each fiscal year. For example, although the observations could be grouped by datadate, it has little meaning beyond being a fiscal year convention. 
+
+In order to make the panel analysis meaningful, I decide to add a variable called size, which is a categorical variable related to the company's total asset. 
+
+Each company will be labeled as "small, medium, or large", according to its total asset. I define that if the company's total asset is smaller than the 25th percentile, it is labeled as "small". If its total asset is larger than the 75th percentile, it is labeled as "large". Otherwise, it is labeled as "medium". The 25th and 75th percentile are calculated using total asset data from all the observations of all years.
+
+An argument can be made that due to the economy growth and inflation, this method will bias towards newer companies. However, because the data has been adjusted to 2012 dollar level, this labeling method should not be too off. 
+
+### Add size lable to every observation
+
+```{r}
+
+# Calculate descriptive statistics for total asset column
+
+get_stats(funda_ratios, NULL, "at")
+
+
+```
+
+
+
+```{r}
+
+# Add company size label to every observation 
+
+funda_ratios <-
+  
+funda_ratios %>%
+  mutate(size = case_when(at <= 21.1451 ~ "small",
+                          at >= 751.4285 ~ "large",
+                          TRUE ~ "medium"))
+
+```
+
+### Calculate Stats for Variables in Table 10 grouped by fiscal year and size
+
+```{r, message=FALSE}
+
+get_stats(funda_ratios, c("size", "fyear"), tb10_col_names)
+
+
+```
+
+
+
+

@@ -1,0 +1,518 @@
+---
+title: 'MGT 6090 Assignment 5 Part 4: IPO'
+author: "Yuguang Shen"
+date: "October 2, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(corrplot)
+library(data.table)
+library(patchwork)
+library(gt)
+library(knitr)
+library(RColorBrewer)
+library(data.table)
+
+```
+
+
+# Useful Functions
+
+```{r}
+
+# Function to get n, mean, sd, ect
+
+get_stats <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_n" = ~n(),
+                        "_mean" = ~mean(., na.rm = TRUE), 
+                        "_sd" = ~sd(., na.rm = TRUE),
+                        "_skew" = ~skewness(., na.rm = TRUE),
+                        "_kurt" = ~kurtosis(., na.rm = TRUE),
+                        "_min" = ~min(., na.rm = TRUE),
+                        "_max" = ~max(., na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "n, mean, sd, skewness, kurtosis, min, max") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean:max, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+# Function to get percentiles
+
+get_percentiles <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_P1" = ~quantile(.,0.01, na.rm = TRUE),
+                        "_P5" = ~quantile(.,0.05, na.rm = TRUE),
+                        "_P25" = ~quantile(.,0.25, na.rm = TRUE),
+                        "_P50" = ~quantile(.,0.5, na.rm = TRUE),
+                        "_P75" = ~quantile(.,0.75, na.rm = TRUE),
+                        "_P95" = ~quantile(.,0.95, na.rm = TRUE),
+                        "_P99" = ~quantile(.,0.99, na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "percentiles") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = P1:P99, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+```
+
+
+
+
+
+
+
+# IPO Analysis
+
+## Load dsf dataset generated from previous part and create a dataset for IPO
+
+```{r}
+
+ipo <- 
+  fread("dsf_ipo.csv") %>%
+  filter(!is.na(ret))
+
+```
+
+## Add more features
+
+```{r}
+
+# ipo_counter will be used to calculate IPO numbers in each month
+
+find_ipo_start <-
+  ipo[, .SD[1], by = permno] %>%
+  mutate(ipo_counter = 1) %>%
+  select(permno, date, ipo_counter)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# Join with original ipo dataset. 
+
+ipo <-
+  
+ left_join(ipo, find_ipo_start, by = c("permno" = "permno", "date" = "date"))
+
+# Drop find_ipo_start to save memory
+
+rm(find_ipo_start)
+gc()
+
+```
+
+
+```{r}
+
+# Add column for Excess Return over Market
+
+ipo <-
+
+ipo %>%
+  mutate(ret_mkt = ret - vwretd)
+
+```
+
+
+## Monthly number of IPOs and Market Return
+
+```{r, message=FALSE, warning=FALSE}
+
+# Create a dataset for monthly number IPOs and average IPO size
+
+monthly_ipo <-
+  
+ipo %>%
+  group_by(date_month) %>%
+  summarise(n_ipo = sum(ipo_counter, na.rm = TRUE),
+            mean_mktcap = mean(mkt_cap, na.rm = TRUE))
+
+monthly_ipo <-
+  monthly_ipo %>%
+  mutate(date_month = ymd(date_month))
+
+# Drop ipo_counter and mkt_cap columns to save memory
+
+ipo <-
+  ipo %>%
+  select(-c(ipo_counter, mkt_cap))
+gc()
+  
+
+# Create a dataset for monthly compounded market return in percentage
+
+setDT(ipo)
+
+monthly_mkt_ret <-
+
+  ipo[, .SD[1], by = date] %>% 
+  select(date_month, vwretd) %>% 
+  group_by(date_month) %>%
+  summarise(monthly_vwretd_pct = (prod(vwretd + 1, na.rm = TRUE) - 1) * 100)
+
+monthly_mkt_ret <-
+  monthly_mkt_ret %>%
+  mutate(date_month = ymd(date_month))
+
+# Combine the above two datasets 
+
+monthly_ipo_and_mkt <-
+  left_join(monthly_ipo, monthly_mkt_ret, by = "date_month")
+
+```
+
+Comments:
+
+Regarding monthly number of IPOs, there are two data points that are abnormally high.
+
+They are 1962-12 with "1965 IPOs" and 1972-12 with "2887 IPOs".
+
+I did some google search and found the actual number of IPOs in 1962 and 1972 from a paper:
+
+https://www.jstor.org/stable/3648214?seq=6#metadata_info_tab_contents
+
+1962 whole year: 236 IPOs
+1972 whole year: 448 IPOs
+
+The possible explaination for these two outliers is :
+
+1962-12 is actually the first month of this dataset. It just means that CRSP started recording these stocks, not meaning that they were all IPOs.
+
+In 1984, CRSP added data from the NASDAQ markets, which dated from December 1972. Therefore, 1972-12 was just the starting time to track NASDAQ data, not meaning that there were 2887 IPOs.
+
+The effects of these two outliers can also been seen in Assignment 5_Part 1, where the monthly number of stocks plot takes two almost vertical jumps at these two time points.
+
+In the following part, I used the actual IPO number and divided by 12 to estimate the IPO number in those two months. In this way, the scale of monthly IPO number plot will look better. 
+
+```{r, message=FALSE, warning=FALSE}
+
+# Prepare CPI data
+
+cpi <-
+    "CPIAUCNS" %>%
+  tq_get(get = "economic.data", from = "1913-01-01") %>%
+  rename("fred_code" = "symbol", "monthly_cpi" = "price") %>%
+  select(-fred_code) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = ceiling_date(date, "months") - 1)
+
+# Calculate average CPI for 2010
+
+cpi_2010 <-
+  cpi %>%
+   filter(date >= "2010-01-31" & date <= "2010-12-31") %>%
+   select(monthly_cpi) %>%
+   colMeans()
+
+# Recalculate CPI based on 2010 level
+
+cpi <-
+  cpi %>%
+  mutate(monthly_cpi= monthly_cpi / cpi_2010 * 100)
+
+monthly_ipo_and_mkt <-
+  left_join(monthly_ipo_and_mkt, cpi, by = c("date_month" = "date"))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# Adjust Market Cap for CPI to 2010 Dollar
+
+monthly_ipo_and_mkt <-
+  
+  monthly_ipo_and_mkt %>%
+  mutate(mean_mktcap_as_2010 = mean_mktcap * 100 / monthly_cpi)
+
+# Adjust number of IPOs for 1962-12-31 and 1972-12-31
+
+monthly_ipo_and_mkt <-
+  
+  monthly_ipo_and_mkt %>%
+  mutate(n_ipo = case_when(date_month == "1962-12-31" ~ 236 %/% 12,
+                           date_month == "1972-12-31" ~ 448 %/% 12,
+                           TRUE ~ n_ipo))
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# Plot Monthly number of IPOs
+
+monthly_ipo_and_mkt %>%
+
+  ggplot(aes(x = date_month, y = monthly_vwretd_pct, fill = monthly_vwretd_pct >= 0)) +
+  geom_col() +
+  scale_fill_manual(values = c("red3", "green3"), guide = FALSE) +
+  geom_line(data = monthly_ipo_and_mkt, aes(x = date_month, y = n_ipo / 5, group = 1), lwd = 0.1) +
+  scale_y_continuous("Number of IPOs (x5)", sec.axis = sec_axis(trans=~.*1, name = "Market Return (%)") )+
+  labs(title = "Monthly number of IPOs VS. Market Return",
+       x = "Month")
+
+```
+
+## Monthly mean IPO size and Market Return
+
+```{r, message=FALSE, warning=FALSE}
+
+# Plot Monthly average IPO size
+
+monthly_ipo_and_mkt %>%
+
+  ggplot(aes(x = date_month, y = monthly_vwretd_pct, fill = monthly_vwretd_pct >= 0)) +
+  geom_col() +
+  scale_fill_manual(values = c("red3", "green3"), guide = FALSE) +
+  geom_line(data = monthly_ipo_and_mkt, aes(x = date_month, y = mean_mktcap_as_2010 / 1000, group = 1), lwd = 0.1) +
+  scale_y_continuous("Avg IPO Size (Billions, 2010 Dollar)", 
+                     sec.axis = sec_axis(trans=~.*1, name = "Market Return (%)") )+
+  labs(title = "Monthly Average IPO Size VS. Market Return",
+       x = "Month")
+
+```
+
+## Monthly mean IPO First Day Return and Market Return
+
+```{r, message=FALSE, warning=FALSE}
+
+# Plot Monthly Average IPO First Day return
+
+ipo[, .SD[1], by = permno] %>% 
+  group_by(date_month) %>%
+  summarise(mean_first_ret = mean(ret) * 100) %>%
+  ggplot(aes(x = date_month, y = mean_first_ret)) + 
+  geom_line(aes(group = 1, color = "1st day")) +
+  geom_line(data = monthly_ipo_and_mkt, aes(x = date_month, y = monthly_vwretd_pct, group = 1, color = "mkt"), lwd = 0.1) +
+  labs(title = "Monthly Average IPO First Day Return VS. Market Return",
+       x = "Month",
+       y = "Return (%)",
+       colour = "Return")
+
+```
+
+## IPO's returns over different time horizon within 3 years of IPO
+
+```{r}
+
+rm(monthly_ipo_and_mkt)
+rm(cpi)
+rm(monthly_ipo)
+rm(monthly_mkt_ret)
+gc()
+
+# Drop vwretd column to save memory
+
+ipo <-
+  ipo %>%
+  select(-c(vwretd, date_month))
+
+```
+
+```{r}
+
+# Find the first trading day for each stock
+
+first_trading_date <-
+
+ipo[, .SD[1], by = permno] %>%
+  select(permno, date) %>%
+  mutate(initial_date = date) %>%
+  select(-date)
+
+```
+
+```{r}
+
+# Join with ipo dataset
+
+ipo <-
+
+ipo %>%
+  select(permno, date, ret, ret_mkt) %>%
+  left_join(first_trading_date, by = c("permno" = "permno"))
+
+rm(first_trading_date)
+gc()
+
+```
+
+```{r}
+
+# Construct first day return
+
+setDT(ipo)
+
+ipo_return <-
+  
+  ipo[date == initial_date, ][, ':='(first_day_ret = ret, first_day_excess_ret = ret_mkt)][,.(permno, first_day_ret, first_day_excess_ret)]  
+  
+```
+
+```{r}
+
+# Construct first month return and join with ipo_return
+
+gc()
+
+
+ipo_return <-
+
+ipo[date <= add_with_rollback(initial_date, months(1)), ][,.(first_month_ret = prod(1 + ret, na.rm = TRUE) - 1,
+            first_month_excess_ret = prod(1 + ret_mkt, na.rm = TRUE) - 1), by = permno] %>%
+            left_join(ipo_return, temp, by = c("permno" = "permno"))
+
+```
+
+```{r}
+
+# Construct first year return and join with ipo_return
+
+gc()
+
+ipo_return <-
+
+ipo[date <= add_with_rollback(initial_date, months(12)), ][,.(first_year_ret = prod(1 + ret, na.rm = TRUE) - 1,
+            first_year_excess_ret = prod(1 + ret_mkt, na.rm = TRUE) - 1), by = permno] %>%
+            left_join(ipo_return, temp, by = c("permno" = "permno"))
+
+```
+
+```{r}
+
+# Construct two year return and join with ipo_return
+
+gc()
+
+ipo_return <-
+
+ipo[date <= add_with_rollback(initial_date, months(24)), ][,.(two_year_ret = prod(1 + ret, na.rm = TRUE) - 1,
+            two_year_excess_ret = prod(1 + ret_mkt, na.rm = TRUE) - 1), by = permno] %>%
+            left_join(ipo_return, temp, by = c("permno" = "permno"))
+
+
+```
+
+```{r}
+
+# Construct three year return and join with ipo_return
+
+gc()
+
+ipo_return <-
+
+ipo[date <= add_with_rollback(initial_date, months(36)), ][,.(three_year_ret = prod(1 + ret, na.rm = TRUE) - 1,
+            three_year_excess_ret = prod(1 + ret_mkt, na.rm = TRUE) - 1), by = permno] %>%
+            left_join(ipo_return, temp, by = c("permno" = "permno"))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# Remove ipo to save memory
+
+rm(ipo)
+gc()
+
+```
+
+```{r}
+
+# Calculate descriptive statistics
+
+columns_of_interest <-
+  ipo_return %>%
+  select(-permno) %>%
+  colnames()
+
+get_stats(ipo_return, NULL, columns_of_interest)
+
+get_percentiles(ipo_return, NULL, columns_of_interest)
+
+```
+
+
+
+
+
+

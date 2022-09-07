@@ -1,0 +1,248 @@
+---
+title: "MGT 6090 Assignment 5 Part 2: Agrregate monthly return from DSF daily return"
+author: "Yuguang Shen"
+date: "September 30, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(corrplot)
+library(data.table)
+library(patchwork)
+library(gt)
+library(knitr)
+library(RColorBrewer)
+library(data.table)
+
+```
+
+# Load DSF dataset
+
+```{r}
+
+# data.table package is good for large dataset
+
+dsf_ret <- 
+  fread("dsf_new.csv", select = c("PERMNO", "DATE", "SHRCD", "RET", "VWRETD")) %>%
+  filter(SHRCD %in% c(10, 11)) %>%
+  select(-SHRCD) %>% 
+  clean_names()
+
+```
+
+# Add features, such as Month, Excess Return over Mkt, and Excess Log Return over Mkt
+
+```{r, message=FALSE, warning=FALSE}
+
+dsf_ret <-
+  
+dsf_ret %>%
+  mutate(ret = as.numeric(ret),
+         ret_mkt = ret - vwretd,
+         date_month = ceiling_date(ymd(date), "months") - 1,
+         ret_mkt_log = log(1 + ret_mkt))
+
+dsf_ret <-
+  
+  dsf_ret %>%
+  mutate(date = ymd(date))
+
+```
+
+# Compute monthly Compounded Excess Return and Cumulative Log Excess Return 
+
+```{r, message=FALSE, warning=FALSE}
+
+# Save it as a new dataset for monthly aggregate return data only
+# Monthly compounded return is the product of (1 + daily return) in that month, then minus 1
+# Monthly cumulative log return is sum of daily log return in that month
+
+monthly_aggregate_ret <-
+
+dsf_ret %>%
+  group_by(permno, date_month) %>%
+  summarise(trading_days = n(),
+            cmpd_ret_mkt = prod(1 + ret_mkt, na.rm = TRUE) - 1,
+            cumu_ret_mkt_log = sum(ret_mkt_log, na.rm = TRUE))
+
+```
+
+# Useful Functions for Statistics
+
+```{r}
+
+# Calculate n, mean, sd, ect
+
+get_stats <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_n" = ~n(),
+                        "_mean" = ~mean(., na.rm = TRUE), 
+                        "_sd" = ~sd(., na.rm = TRUE),
+                        "_skew" = ~skewness(., na.rm = TRUE),
+                        "_kurt" = ~kurtosis(., na.rm = TRUE),
+                        "_min" = ~min(., na.rm = TRUE),
+                        "_max" = ~max(., na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "n, mean, sd, skewness, kurtosis, min, max") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean:max, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+# Calculate percentile
+
+get_percentiles <- function(my_df, col_0 = NULL, col_1) {
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_P1" = ~quantile(.,0.01, na.rm = TRUE),
+                        "_P5" = ~quantile(.,0.05, na.rm = TRUE),
+                        "_P25" = ~quantile(.,0.25, na.rm = TRUE),
+                        "_P50" = ~quantile(.,0.5, na.rm = TRUE),
+                        "_P75" = ~quantile(.,0.75, na.rm = TRUE),
+                        "_P95" = ~quantile(.,0.95, na.rm = TRUE),
+                        "_P99" = ~quantile(.,0.99, na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "percentiles") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = P1:P99, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+```
+
+
+# Descriptive stats of monthly aggregate Returns, 1925-2020
+
+```{r}
+
+monthly_aggregate_ret %>%
+  filter(date_month > "1925-01-01") %>%
+  get_stats(NULL, c("cmpd_ret_mkt", "cumu_ret_mkt_log"))
+
+monthly_aggregate_ret %>%
+  filter(date_month > "1925-01-01") %>%
+  get_percentiles(NULL, c("cmpd_ret_mkt", "cumu_ret_mkt_log"))
+
+```
+
+# Descriptive stats of monthly aggregate Returns, 1963-2020
+
+```{r}
+
+monthly_aggregate_ret %>%
+  filter(date_month > "1963-01-01") %>%
+  get_stats(NULL, c("cmpd_ret_mkt", "cumu_ret_mkt_log"))
+
+monthly_aggregate_ret %>%
+  filter(date_month > "1963-01-01") %>%
+  get_percentiles(NULL, c("cmpd_ret_mkt", "cumu_ret_mkt_log"))
+
+
+```
+
+# Plot monthly mean and sd for Compounded Excess Return over Market
+
+```{r}
+
+cmpd_ret_stats_table <-
+  monthly_aggregate_ret %>%
+  get_stats("date_month", "cmpd_ret_mkt") 
+
+cmpd_ret_stats_table$`_data` %>%
+  select(date_month, mean, sd) %>%
+  pivot_longer(-date_month, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date_month, value, colour = variable)) +
+  geom_line() +
+  labs(title = "Monthly Mean and Sd of Compounded Excess Return over Market")
+
+```
+
+# Plot monthly mean and sd for Cumulative Excess Log Return over Market
+
+```{r}
+
+cumu_ret_log_stats_table <-
+  monthly_aggregate_ret %>%
+  get_stats("date_month", "cumu_ret_mkt_log") 
+
+cumu_ret_log_stats_table$`_data` %>%
+  select(date_month, mean, sd) %>%
+  pivot_longer(-date_month, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date_month, value, colour = variable)) +
+  geom_line() +
+  labs(title = "Monthly Mean and Sd of Cumulative Excess Log Return over Market")
+
+```

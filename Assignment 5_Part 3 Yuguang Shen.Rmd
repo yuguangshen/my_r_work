@@ -1,0 +1,335 @@
+---
+title: 'MGT 6090 Assignment 5 Part 3: DSF descriptive stats'
+author: "Yuguang Shen"
+date: "October 1, 2021"
+output:
+  pdf_document:
+    fig_height: 5.5
+    fig_width: 7
+  word_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(corrplot)
+library(data.table)
+library(patchwork)
+library(gt)
+library(knitr)
+library(RColorBrewer)
+library(data.table)
+
+```
+
+# Useful Functions
+
+```{r}
+
+# Function to get n, mean, sd, ect
+
+get_stats <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_n" = ~n(),
+                        "_mean" = ~mean(., na.rm = TRUE), 
+                        "_sd" = ~sd(., na.rm = TRUE),
+                        "_skew" = ~skewness(., na.rm = TRUE),
+                        "_kurt" = ~kurtosis(., na.rm = TRUE),
+                        "_min" = ~min(., na.rm = TRUE),
+                        "_max" = ~max(., na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "n, mean, sd, skewness, kurtosis, min, max") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean:max, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+# Function to get percentiles
+
+get_percentiles <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_P1" = ~quantile(.,0.01, na.rm = TRUE),
+                        "_P5" = ~quantile(.,0.05, na.rm = TRUE),
+                        "_P25" = ~quantile(.,0.25, na.rm = TRUE),
+                        "_P50" = ~quantile(.,0.5, na.rm = TRUE),
+                        "_P75" = ~quantile(.,0.75, na.rm = TRUE),
+                        "_P95" = ~quantile(.,0.95, na.rm = TRUE),
+                        "_P99" = ~quantile(.,0.99, na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "percentiles") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = P1:P99, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+```
+
+
+# Load DSF dataset
+
+```{r}
+
+# data.table package is good for large dataset
+
+dsf <- 
+  fread("dsf_new.csv", select = c("PERMNO", "DATE", "SHRCD",  "PRC", "VOL", 
+                                  "OPENPRC", "ASKHI", "BIDLO", "BID", "ASK",
+                                  "SHROUT", "RET", "VWRETD")) %>%
+  filter(SHRCD %in% c(10, 11)) %>%
+  select(-SHRCD) %>% 
+  clean_names()
+
+```
+
+# Add features
+
+```{r, message=FALSE, warning=FALSE}
+
+dsf <-
+  
+dsf %>%
+  mutate(date = ymd(date),
+         prc = abs(prc),
+         ret = as.numeric(ret),
+         bid_ask_spread = ask - bid,
+         price_range = askhi - bidlo,
+         close_open = prc - openprc,
+         mkt_cap = prc * shrout * 1000 / 1000000,
+         date_month = ceiling_date(date, "months") - 1)
+
+```
+
+# Descriptive Statistics for Daily Return, Daily Closing Price, Daily Bid-Ask Spread, Volume, Price Range, and Close-Open
+
+```{r, message=FALSE, warning=FALSE}
+
+dsf %>%
+  get_stats(NULL, c("ret", "prc", "bid_ask_spread", "vol", "price_range", "close_open"))
+
+dsf %>%
+  get_percentiles(NULL, c("ret", "prc", "bid_ask_spread", "vol", "price_range", "close_open"))
+
+```
+
+# Plot statistics for Daily Price Range, Daily Close-Open, and Daily Return
+
+## Generate statistics tables for each variable
+
+```{r, message=FALSE, warning=FALSE}
+
+# Create table for Daily Price Range
+
+price_range_stats_table <-
+  dsf %>%
+  select(date, price_range) %>%
+  get_stats("date", "price_range")
+
+price_range_percentile_table <-
+  dsf %>%
+  select(date, price_range) %>%
+  get_percentiles("date", "price_range")
+  
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# Create table for Daily Close-Open
+
+close_open_stats_table <-
+  dsf %>%
+  select(date, close_open) %>%
+  get_stats("date", "close_open")
+
+close_open_percentile_table <-
+  dsf %>%
+  select(date, close_open) %>%
+  get_percentiles("date", "close_open")
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# Create table for Daily Return
+
+ret_stats_table <-
+  dsf %>%
+  select(date, ret) %>%
+  get_stats("date", "ret")
+
+ret_percentile_table <-
+  dsf %>%
+  select(date, ret) %>%
+  get_percentiles("date", "ret")
+
+```
+
+
+## Plot certain stats over time for each variable
+
+```{r, message=FALSE, warning=FALSE}
+
+# Plot mean, sd, 25th, 75th for Daily Price Range over time
+
+price_range_stats_table$`_data` %>%
+  select(date, mean, sd) %>%
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) +
+  geom_line(lwd = 0.1) +
+  labs(title = "Daily Mean and Sd of Price Range")
+
+
+price_range_percentile_table$`_data` %>%
+  select(date, P25, P75) %>%
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) +
+  geom_line(lwd = 0.1) +
+  labs(title = "Daily 25th and 75th Percentile of Price Range")
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# Plot mean, sd, 25th, 75th for Daily Close-Open over time
+
+close_open_stats_table$`_data` %>%
+  select(date, mean, sd) %>%
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) +
+  geom_line(lwd = 0.1) +
+  labs(title = "Daily Mean and Sd of Close-Open")
+
+
+close_open_percentile_table$`_data` %>%
+  select(date, P25, P75) %>%
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) +
+  geom_line(lwd = 0.1) +
+  labs(title = "Daily 25th and 75th Percentile of Close-Open")
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+# Plot mean, sd, 25th, 75th for Daily Return over time
+
+ret_stats_table$`_data` %>%
+  select(date, mean, sd) %>%
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) +
+  geom_line(lwd = 0.1) +
+  labs(title = "Daily Mean and Sd of Return")
+
+
+ret_percentile_table$`_data` %>%
+  select(date, P25, P75) %>%
+  pivot_longer(-date, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(date, value, colour = variable)) +
+  geom_line(lwd = 0.1) +
+  labs(title = "Daily 25th and 75th Percentile of Return")
+
+```
+
+# Save dsf file to be used in next part
+
+```{r, message=FALSE, warning=FALSE}
+
+# Trim down dsf data for next step
+
+# dsf <-
+#   dsf %>%
+#   select(permno, date, date_month, ret, mkt_cap, vwretd)
+
+# Save the trimed dsf file
+
+# fwrite(dsf, "dsf_ipo.csv")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

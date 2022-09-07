@@ -1,0 +1,1100 @@
+---
+title: "MGT6090 Assignment 3"
+author: "Yuguang Shen"
+date: "September 10, 2021"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+# Install and load packages
+
+This code block installs and loads necessary packages for this project.
+
+```{r}
+# install.packages("tidyverse")
+# install.packages("tidyquant")
+# install.packages("janitor")
+# install.packages("timetk")
+# install.packages("corrr")
+# install.packages("patchwork")
+# install.packages("corrplot")
+# install.packages("data.table")
+
+
+
+
+library(tidyverse)
+library(tidyquant)
+library(janitor)
+library(lubridate)
+library(timetk)
+library(readxl)
+library(corrr)
+library(patchwork)
+library(corrplot)
+
+
+```
+
+
+# Macro economic indicators
+
+Import macro economic indicators from FRED and generate geom for each indicator
+
+
+## FRED Unemployment Rate (Monthly)
+
+```{r}
+# When importing FRED data, set a "from" time early enough to cover the entire period of our interest
+# In this project, 1985 is early enough
+unemployment <-
+  "UNRATE" %>%
+  tq_get(get = "economic.data", from = "1985-01-01") %>%
+  rename("fred_code" = "symbol", "unemployment_rate" = "price") %>%
+  select(-fred_code)
+
+unemployment_layer <-
+  geom_line(data = unemployment, aes(x = date, y = unemployment_rate ), color = "red") 
+
+```
+
+
+## FRED Real GDP Pct Change (Quarterly)
+
+```{r}
+real_gdp <-
+  "A191RL1Q225SBEA" %>%
+  tq_get(get = "economic.data", from = "1985-01-01") %>%
+  rename("fred_code" = "symbol", "real_gdp_change" = "price") %>%
+  select(-fred_code)
+
+real_gdp_layer <-
+
+  geom_line(data = real_gdp, aes(x = date, y = real_gdp_change ), color = "blue") 
+
+```
+
+
+## FRED Effective Fedral Funds Rate (Monthly)
+
+```{r}
+fed_rate <-
+  "FEDFUNDS" %>%
+  tq_get(get = "economic.data", from = "1985-01-01") %>%
+  rename("fred_code" = "symbol", "fed_fund_rate" = "price") %>%
+  select(-fred_code)
+
+fed_rate_layer <-
+  geom_line(data = fed_rate, aes(x = date, y = fed_fund_rate ), color = "orange")
+
+
+```
+
+
+
+
+# Useful Functions
+
+Create some functions to automate data analysis and reporting
+
+## calculate_stats(my_df, "col_1", "col_2")
+
+This function calculates the descriptive statistics for certain columns in a dataset.
+
+```{r}
+calculate_stats <- function(my_df, col_1, col_2){
+  
+  stats_result <-
+  my_df %>%
+    summarise(across(col_1:col_2, 
+                   list(mean = ~mean(., na.rm = TRUE), 
+                        P25 = ~quantile(.,0.25, na.rm = TRUE),
+                        P50 = ~quantile(.,0.5, na.rm = TRUE),
+                        P75 = ~quantile(.,0.75, na.rm = TRUE),
+                        sd = ~sd(., na.rm = TRUE)
+                        ))) 
+  
+  return (stats_result)
+}
+
+```
+
+
+## generate_plot(my_df)
+
+This function draws plots together with macro economic indicators for a dataset.
+
+```{r}
+generate_plot <- function(my_df){
+  
+  plot_list <- list()
+  
+  names <- 
+    my_df %>%
+    select(-date) %>%
+    colnames()
+  
+  # Created unemployment plot
+  unemployment_plot <-
+    ggplot() + 
+    unemployment_layer +
+    labs(title = "Unemployment Rate",
+        y = "Unemployment Rate (%)",
+        x = "") +
+  scale_x_date( date_labels = "%Y", 
+               limits = c(min(my_df$date), max(my_df$date))) +
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+  
+  # Create Real_GDP plot
+  real_gdp_plot <-
+    ggplot() +
+    real_gdp_layer +
+     labs(title = "Real GDP Percent Change",
+        y = "Real GPD Change (%)",
+        x = "") +
+   scale_x_date( date_labels = "%Y", 
+                limits = c(min(my_df$date), max(my_df$date))) +
+   scale_y_continuous(breaks = seq(-35, 35, by = 5)) +
+   theme(axis.text.x=element_text(angle=60, hjust=1)) +
+   geom_hline(yintercept = 0)
+  
+  # Create Effective Fed Funds Rate plot
+  fed_rate_plot <-
+    ggplot() + 
+    fed_rate_layer + 
+      labs(title = "Effective Federal Funds Rate",
+       y = "Fed Funds Rate (%)",
+       x = "") +
+  scale_x_date( date_labels = "%Y",
+                limits = c(min(my_df$date), max(my_df$date))) +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) 
+  
+  # Plot each column of my_df with three macro economic indicators and save the plots to a list
+  
+  for (i in names) {
+  
+  temp_plot <-
+    my_df %>%
+    ggplot(aes_string(x = my_df$date, y = i)) + 
+    geom_line() + 
+    labs(title = i,
+       y = "Volume (Billions $)",
+       x = "") +
+    scale_x_date( date_labels = "%Y") +
+    theme(axis.text.x=element_text(angle=60, hjust=1)) 
+  
+  output_plot <-  
+    (unemployment_plot | real_gdp_plot | fed_rate_plot) / 
+    (temp_plot | temp_plot | temp_plot)
+
+  plot_list[[i]] <- output_plot
+
+  }
+  
+  return (plot_list)
+  
+}
+
+```
+
+
+## get_correlation(my_df, "title_for_output")
+
+This function calculates and visualizes the correlation among columns of a dataset.
+
+```{r}
+get_correlation <- function(my_df, title)
+{
+  cor_heatmap <-
+  my_df %>%
+  select(-date) %>%
+  cor(use="pairwise.complete.obs") %>%
+  corrplot(method = "number", title = title, mar=c(0,0,1,0))
+  
+  return (cor_heatmap)
+  
+}
+
+```
+
+
+# Data import and cleaning
+
+Import and clean data
+
+## US Treasury Trading
+
+```{r}
+
+treasury_trading <-
+  
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/ta-us-treasury-trading-volume-sifma.xls", sheet = "Monthly", guess_max = 1000, skip = 5) %>%
+  data.table::setnames(old = colnames(.), new = c("date", "t_bill", "tiis", "frn", "coupon_<2", "coupon_2-3", "coupon_3-6", "coupon_6-7",                "coupon_7-11", "coupon_>11", "total")) %>%
+  clean_names() %>%
+  mutate(date_new = my(date)) %>%
+  mutate(date = as.numeric(date)) %>%
+  mutate(date = as_date(date, origin = "1899-12-30")) %>%
+  mutate(date_new = ceiling_date(date_new, unit = "month") - 1) %>%
+  mutate(date = case_when(is.na(date) & !is.na(date_new) ~ date_new,
+                                 TRUE ~ date)
+                ) %>%
+  mutate(across(-date, as.numeric)) %>%
+  select(-date_new) %>%
+  filter(!is.na(date)) 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+## US Equity Capital Formation and Trading
+```{r}
+equity_cap_formation <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Equities-and-Related-Statistics-SIFMA.xlsx", sheet = "Capital Formation", guess_max = 1000, skip = 8, range = "A9:F79") %>%
+  rename("date" = "...1", "ipo" = "IPOs") %>%
+  clean_names() %>%
+  filter(!is.na(date)) %>%
+  filter(date != "2020" & date != "2019") %>%
+  mutate(date_new = make_date(date, 12, 31)) %>%
+  filter(!is.na(date_new) ) %>%
+  mutate(date = case_when(year(date_new) < 2021 ~ date_new,
+                           TRUE ~ as_date(as.numeric(date), origin = "1899-12-30"))) %>%
+  select(-date_new)
+
+```
+
+```{r}
+equity_trading <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Equities-and-Related-Statistics-SIFMA.xlsx", sheet = "ADV $", guess_max = 1000, skip = 8, range = "A9:L71") %>%
+  select(-...5) %>%
+  select(-...11) %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  filter(!is.na(market)) %>%
+  filter(date != "2020" & date != "2019" & date != "2008") %>%
+  mutate(date_new = make_date(date, 12, 31)) %>%
+  filter(!is.na(date_new) ) %>%
+  mutate(date = case_when(year(date_new) < 2021 ~ date_new,
+                           TRUE ~ as_date(as.numeric(date), origin = "1899-12-30"))) %>%
+  select(-date_new) %>%
+  mutate(across(tape_a:market, as.numeric))
+  
+```
+
+
+## US Fixed Income Trading
+```{r}
+fix_income_trading <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Fixed-Income-Securities-Statistics-SIFMA.xlsx", sheet = "Trading Volume", guess_max = 1000, skip = 7, range = "A8:I81") %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  mutate(across(everything(), as.numeric)) %>%
+  filter(date != 2019 & date != 2020 & !is.na(date)) %>%
+  mutate(date_new = make_date(date, 12, 31)) %>%
+  mutate(date = case_when(year(date_new) < 2021 ~ date_new,
+                            TRUE ~ as_date(date, origin = "1899-12-30"))) %>%
+  select(-date_new) %>%
+  rename("fed_agen_securities" = "federal_agency_securities")
+
+```
+
+
+
+## US SF Trading Daily and Monthly
+```{r}
+sf_trading_daily <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/sf-us-sf-trading-volume-sifma.xls", sheet = "TRACE - Daily", guess_max = 5000, range = "A6:R2346", .name_repair = "unique") %>%
+  select(-...6) %>%
+  select(-...17) %>%
+  rename("total_agency" = "Total...5", "total_non_agency" = "Total...16") %>%
+  clean_names() %>%
+  mutate(date = ymd(date)) %>%
+  mutate(month = ceiling_date(date, "month") - 1) %>%
+  relocate(month, .after = date)
+
+# Aggregate daily data to monthly
+sf_trading_monthly <-
+  sf_trading_daily %>%
+  group_by(month) %>%
+  summarise(across(cmo:grand_total, 
+                   list(m = ~mean(., na.rm = TRUE)))) %>%
+  rename("date" = "month") 
+  
+```
+
+## US Agency Trading
+```{r}
+agency_trading <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/ta-us-agency-trading-volume-sifma.xls", sheet = "Trading Volume", guess_max = 5000, range = "A10:F136") %>%
+  rename("date" = "...1") %>%
+  mutate(date = ymd(date)) %>%
+  clean_names() %>%
+  rename("other" = "other2") %>%
+  mutate(date = ceiling_date(date, "month") - 1)
+
+```
+
+## US Corporate Bond Trading
+```{r}
+corp_bond_trading <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/corporate-us-corporate-trading-volume-sifma.xls", sheet = "TRACE", guess_max = 5000, range = "A10:N198") %>%
+  select(-...5) %>%
+  select(-...9) %>%
+  select(-...13) %>%
+  data.table::setnames(old = colnames(.), new = c("date", "pt_ig", "pt_hy", "pt_total", "ig_144a", "hy_144a", "total_144a", "nc_ig", "nc_hy", "nc_total", "c_total")) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = ceiling_date(date, "month") - 1)
+
+```
+
+## US Treasury Issuance, Outstanding, and Interest Rates
+```{r}
+# Issuance
+treasury_issuance <-
+      read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Treasury-Securities-Statistics-SIFMA.xlsx", sheet = "Issuance Net", guess_max = 5000, range = "A9:P30") %>%
+  select(-...5) %>%
+  select(-...9) %>%
+  select(-...13) %>%
+  data.table::setnames(old = colnames(.), new = c("date", "bill_gi", "bill_gr", "bill_net", "notes_gi", "notes_gr", "notes_net", "bond_gi", "bond_gr", "bond_net", "total_gi", "total_gr", "total_net")) %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "month") - 1)
+
+# Outstanding
+treasury_outstand <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Treasury-Securities-Statistics-SIFMA.xlsx", sheet = "Outstanding", guess_max = 5000, range = "A8:G39") %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1)
+
+
+# Interest Rates
+treasury_rates <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Treasury-Securities-Statistics-SIFMA.xlsx", sheet = "Yield Curve Rates", guess_max = 5000, range = "A9:D40") %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1) %>%
+  rename("3_month_bills" = "x3_month_bills", "10_year_notes" = "x10_year_notes") %>%
+  rename("bills_3_month" = "3_month_bills") %>%
+  rename("notes_10_year" = "10_year_notes") 
+
+```
+## US MBS Issuance and Outstanding
+```{r}
+# MBS Issuance
+mbs_issuance <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Mortgage-Backed-Securities-Statistics-SIFMA.xlsx", sheet = "MBS Issuance", guess_max = 5000, range = "A19:J44") %>%
+  select(-...4) %>%
+  select(-...7) %>%
+  clean_names() %>%
+  data.table::setnames(old = colnames(.), new = c("date", "a_mbs", "a_cmo", "na_cmbs", "na_rmbs", "a_total", "na_total", "total")) %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1)
+
+
+# MBS Outstanding
+mbs_outstand <-
+      read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Mortgage-Backed-Securities-Statistics-SIFMA.xlsx", sheet = "MBS Outstanding", guess_max = 5000, range = "A18:J37") %>%
+  select(-...4) %>%
+  select(-...7) %>%
+  clean_names() %>%
+  data.table::setnames(old = colnames(.), new = c("date", "a_mbs", "a_cmo", "na_cmbs", "na_rmbs", "a_total", "na_total", "total")) %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1)
+
+```
+## US ABS Issuance and Outstanding
+```{r}
+# ABS Issuance
+abs_issuance <-
+   read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Asset-Backed-Securities-Statistics-SIFMA.xlsx", sheet = "ABS Issuance", guess_max = 5000, range = "A11:H47") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1)
+
+# ABS Outstanding
+abs_outstand <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Asset-Backed-Securities-Statistics-SIFMA.xlsx", sheet = "ABS Outstanding", guess_max = 5000,  range = "A14:H50") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1)
+
+```
+## US Fix Income Issuance and Outstanding
+```{r}
+# Fix Income Issuance
+fix_income_issuance <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Fixed-Income-Securities-Statistics-SIFMA.xlsx", sheet = "Issuance", guess_max = 1000, range = "A8:H33") %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1) %>%
+  rename("fed_agen_securities" = "federal_agency_securities")
+
+
+# Fix Income Outstanding
+fix_income_outstand <-
+    read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Fixed-Income-Securities-Statistics-SIFMA.xlsx", sheet = "Outstanding", guess_max = 1000, range = "A8:I49") %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1) %>%
+  mutate(asset_backed = as.numeric(asset_backed)) %>%
+  rename("fed_agen_securities" = "federal_agency_securities")
+
+```
+## US ABCP and CP Outstanding (Money Market Instrument)
+```{r}
+
+mm_outstand <-
+   read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Money-Market-Instruments-Statistics-SIFMA.xlsx", sheet = "Outstanding MM Instruments", guess_max = 1000, range = "A9:J34") %>%
+  select(-...5) %>%
+  clean_names() %>%
+  rename("date" = "x1") %>%
+  select(-commercial_paper) %>%
+  data.table::setnames(old = c("total_4", "non_financial", "financial", "abcp", "other", "total_10"),
+                       new = c("total", "cp_non_fin", "cp_fin", "cp_abcp", "cp_other", "cp_total")) %>%
+  relocate(bankers_acceptance, .after = cp_total) %>%
+  relocate(total, .after = bankers_acceptance) %>%
+  mutate(across(-date, as.numeric)) %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1)
+
+```
+## US Municipal Issuance
+```{r}
+muni_issuance <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Municipal-Bonds-Statistics-SIFMA.xlsx", sheet = "Issuance Total", guess_max = 1000, range = "A9:L34") %>%
+  select(-...4) %>%
+  select(-...8) %>%
+  select(-...11) %>%
+  rename("date" = "...1") %>%
+  clean_names() %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1) %>%
+  rename("pvt_plc" = "private_placement")
+
+
+```
+## US Corporate Bond Issuance
+```{r}
+corp_bond_issuance <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/US-Corporate-Bonds-Statistics-SIFMA.xlsx", sheet = "Issuance", guess_max = 5000, range = "A9:N34") %>%
+  select(-...5) %>%
+  select(-...8) %>%
+  select(-...11) %>%
+  select(-...13) %>%
+  clean_names() %>%
+  data.table::setnames(old = c("x1", "total", "x12", "x14"), 
+                       new = c("date", "ig_hy_comb", "convertable", "total")) %>%
+  mutate(date = make_date(date)) %>%
+  mutate(date = ceiling_date(date, "year") - 1) %>%
+  rename("ig" = "investment_grade", "hy" = "high_yield")
+
+```
+## Crypto Trading
+```{r}
+data_dir <- "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Crypto"
+
+# Create a list for all data file names
+data_files_list <- list.files(path = data_dir, pattern = "*.csv", full.names = TRUE)
+file_names <-list.files(path = data_dir, pattern = "*.csv", full.names = FALSE)
+
+crypto_trading <- map_dfr(data_files_list, read_csv, .id = "ticker")
+
+# Assign ticker to each crypto
+for (i in 1:10){
+  
+  crypto_trading <-
+    crypto_trading %>%
+    mutate( ticker = case_when(ticker == i ~ sub("\\-.*", "", file_names[i]),
+                               TRUE ~ ticker))
+}
+
+
+crypto_trading %>%
+  data.table::setnames(old = c("snapped_at", "market_cap", "total_volume"), 
+                       new = c("date", "market_cap_bil", "total_volume_bil"))
+
+crypto_trading <-
+  crypto_trading %>%
+  mutate(date = ymd_hms(date)) %>% 
+  mutate(date = as.Date(date)) %>%
+  mutate(market_cap_bil = market_cap_bil / 1000000000) %>%
+  mutate(total_volume_bil = total_volume_bil / 1000000000)
+
+```
+## US Repo
+
+```{r}
+
+# Triparty Repo
+
+triparty_repo <-
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/Funding-US-Repo-SIFMA.xlsx", sheet = "Triparty Repo", guess_max = 5000, skip = 2)
+
+# Extract the collateral volume data into a new dataset. Collateral volume is equivalent to trading volume, because every repo trade must come with a collateral with at least the same value (usually a little bit higher).
+
+triparty_repo_collateral <-
+  triparty_repo %>%
+  slice(2:45) %>%
+  mutate(...1 = case_when(...1 == "Fedwire-eligible" ~ "fedwire",
+                          ...1 == "Non Fedwire-eligible" ~ "non_fedwire",
+                          ...1 == "Both Fedwire-eligible and non-eligible" ~ "both",
+                          TRUE ~ ...1)) %>%
+  filter(!is.na(...2)) %>%
+  fill(...1, .direction = "down") %>%
+  unite("collateral_type", ...1:...2, sep = "_", remove = TRUE) %>%
+  data.table::transpose(keep.names = "date", make.names = "collateral_type") %>%
+  clean_names() %>%
+  mutate(across(everything(), as.numeric)) %>%
+  mutate(date = as_date(date, origin = "1899-12-30"))
+
+```
+
+```{r}
+
+# GCF Repo
+
+gcf_repo <- 
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/Funding-US-Repo-SIFMA.xlsx", sheet = "GCF Repo", guess_max = 5000, skip = 3) %>%
+  clean_names() %>%
+  select(x1, total_par_amount_millions, x7, x8) %>%
+    mutate(across(everything(), as.numeric)) %>%
+  data.table::setnames(old = colnames(.), new = c("date", "treasury", "agency", "mbs")) %>%
+  filter(!is.na(date)) %>%
+  filter(date > 2019) %>%
+  mutate(date = as_date(date, origin = "1899-12-30"))
+
+```
+
+```{r}
+
+# Primary Dealer Repo
+
+primary_dealer_repo <- 
+  read_excel(path = "C:/_Ga Tech/MS QCF/2021 Fall/MGT6090/Assignment 3/Data/Funding-US-Repo-SIFMA.xlsx", sheet = "PrimaryDealer", guess_max = 5000, range = "A5:K194") %>%
+  select(-c(...6, ...10)) %>%
+  data.table::setnames(old = colnames(.), new = 
+                         c("year", "q", "repo_overnight", "repo_term", "repo_total",
+                           "r_repo_overnight", "r_repo_term", "r_repo_total", "total")) %>%
+  filter(!(is.na(year) & is.na(q))) %>%
+  fill(year, .direction = "down") %>%
+  unite("date", year:q, sep = "/", remove = TRUE, na.rm = TRUE) %>%
+  mutate(date_num = as.numeric(date)) %>% 
+  filter(is.na(date_num)) %>%
+  select(-date_num)
+
+```
+
+# Data analysis and visualization
+
+Analyze the data and visualize the results
+
+## US Treasury Trading Data
+
+```{r}
+
+calculate_stats(treasury_trading, "t_bill", "total")
+
+generate_plot(treasury_trading)
+
+get_correlation(treasury_trading, "Correlation within US Treasury Trading")
+
+```
+
+## US Equity Trading  and Capital Formation Data
+
+```{r}
+
+# Equity Trading
+
+calculate_stats(equity_trading, "tape_a", "market")
+
+generate_plot(equity_trading)
+
+get_correlation(equity_trading, "Correlation within US Equity Trading")
+
+# Equity Capital Formation
+
+calculate_stats(equity_cap_formation, "ipo", "total_equity")
+
+generate_plot(equity_cap_formation)
+
+get_correlation(equity_cap_formation, "Correlation within US Equity Cap Formation")
+
+```
+
+## US Fixed Income Trading Data
+
+```{r}
+
+calculate_stats(fix_income_trading, "municipal", "total")
+
+generate_plot(fix_income_trading)
+
+get_correlation(fix_income_trading, "Correlation within Fix Income Trading")
+
+```
+
+## US SF Trading Data, Monthly
+
+```{r}
+
+calculate_stats(sf_trading_monthly, "cmo_m", "grand_total_m")
+
+generate_plot(sf_trading_monthly)
+
+get_correlation(sf_trading_monthly, "Correlation within SF Trading")
+
+```
+
+## US Agency Trading Data
+
+```{r}
+
+calculate_stats(agency_trading, "fannie_mae", "total")
+
+generate_plot(agency_trading)
+
+get_correlation(agency_trading, "Correlation within Agency Trading")
+
+```
+
+## US Corporate Bond Trading Data
+
+```{r}
+
+calculate_stats(corp_bond_trading, "pt_ig", "c_total")
+
+generate_plot(corp_bond_trading)
+
+get_correlation(corp_bond_trading, "Correlation within Corporate Bond Trading")
+
+```
+
+## US Treasury Issuance, Outstanding and Interest Rate Data
+
+```{r}
+# Treasury Issuance
+
+calculate_stats(treasury_issuance, "bill_gi", "total_net")
+
+generate_plot(treasury_issuance)
+
+get_correlation(treasury_issuance, "Correlation of Treasury Issuance")
+
+# Treasury Outstanding
+
+calculate_stats(treasury_outstand, "bills", "total")
+
+generate_plot(treasury_outstand)
+
+get_correlation(treasury_outstand, "Correlation of Treasury Outstanding")
+
+# Treasury Interest Rates
+
+calculate_stats(treasury_rates, "bills_3_month", "spread")
+
+generate_plot(treasury_rates)
+
+get_correlation(treasury_rates, "Correlation of Treasury Interest Rates")
+
+```
+
+
+## US MBS Issuance and Outstanding Data
+
+```{r}
+
+# MBS Issuance
+
+calculate_stats(mbs_issuance, "a_mbs", "total")
+
+generate_plot(mbs_issuance)
+
+get_correlation(mbs_issuance, "Correlation of MBS Issuance")
+
+# MBS Outstanding
+
+calculate_stats(mbs_outstand, "a_mbs", "total")
+
+generate_plot(mbs_outstand)
+
+get_correlation(mbs_outstand, "Correlation of MBS Outstanding")
+
+```
+
+## US ABS Issuance and Outstanding Data
+
+```{r}
+
+# ABS Issuance
+
+calculate_stats(abs_issuance, "auto", "total")
+
+generate_plot(abs_issuance)
+
+get_correlation(abs_issuance, "Correlation of ABS Issuance")
+
+# ABS Outstanding
+
+calculate_stats(abs_outstand, "automobile", "total")
+
+generate_plot(abs_outstand)
+
+get_correlation(abs_outstand, "Correlation of ABS Outstanding")
+
+```
+
+## US Fix Income Issuance and Outstanding Data
+
+```{r}
+
+# Fix Income Issuance
+
+calculate_stats(fix_income_issuance, "municipal", "total")
+
+generate_plot(fix_income_issuance)
+
+get_correlation(fix_income_issuance, "Correlation of Fix Income Issuance")
+
+# Fix Income Outstanding
+
+calculate_stats(fix_income_outstand, "municipal", "total")
+
+generate_plot(fix_income_outstand)
+
+get_correlation(fix_income_outstand, "Correlation of Fix Income Outstanding")
+
+
+```
+
+## US Money Market Insrument Outstanding
+
+```{r}
+
+calculate_stats(mm_outstand, "cp_non_fin", "total")
+
+generate_plot(mm_outstand)
+
+get_correlation(mm_outstand, "Correlation of Money Market Instrument Outstanding")
+
+```
+
+## US Municipal Issuance Data
+
+```{r}
+
+calculate_stats(muni_issuance, "go", "total")
+
+generate_plot(muni_issuance)
+
+get_correlation(muni_issuance, "Correlation of Municipal Issuance")
+
+```
+
+## US Repo
+
+```{r}
+
+# Triparty repo collateral
+
+triparty_repo_collateral %>%
+  select(date, fedwire_subtotal, non_fedwire_subtotal, both_total) %>%
+  calculate_stats("fedwire_subtotal", "both_total")
+
+triparty_repo_collateral %>%
+  select(date, fedwire_subtotal, non_fedwire_subtotal, both_total) %>%
+  generate_plot()
+
+triparty_repo_collateral %>%
+  select(date, fedwire_subtotal, non_fedwire_subtotal, both_total) %>%
+  get_correlation("Correlation of Fedwire and Non Fedwire collateral in Triparty Repo")
+
+# GCF Repo
+
+calculate_stats(gcf_repo, "treasury", "mbs")
+
+generate_plot(gcf_repo)
+
+get_correlation(gcf_repo, "Correlation of different collaterals in GCF Repo")
+
+
+
+```
+## US Corporate Bond Issuance Data
+
+```{r}
+
+calculate_stats(corp_bond_issuance, "ig", "total")
+
+generate_plot(corp_bond_issuance)
+
+get_correlation(corp_bond_issuance, "Correlation of Corporate Bond Issuance")
+
+```
+
+## Crypto Trading Data
+
+```{r}
+
+# Extract only trading volume from the original data set
+
+crypto_volume <-
+  crypto_trading %>%
+  select(-price) %>%
+  select(-market_cap_bil)
+
+```
+
+
+```{r}
+# Calculate descriptive statistics
+
+crypto_volume %>%
+  group_by(ticker) %>%
+  calculate_stats("total_volume_bil", "total_volume_bil")
+
+```
+
+
+Plot time series of volume for each crypto
+
+```{r}
+# ada
+
+ada_volume <-
+  crypto_volume %>%
+  filter(ticker == "ada") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(ada_volume)
+
+```
+
+
+```{r}
+# bnb
+
+bnb_volume <-
+  crypto_volume %>%
+  filter(ticker == "bnb") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(bnb_volume)
+
+```
+
+
+```{r}
+# btc
+
+btc_volume <-
+  crypto_volume %>%
+  filter(ticker == "btc") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(btc_volume)
+
+```
+
+
+```{r}
+# doge
+
+doge_volume <-
+  crypto_volume %>%
+  filter(ticker == "doge") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(doge_volume)
+
+```
+
+
+```{r}
+# dot
+
+dot_volume <-
+  crypto_volume %>%
+  filter(ticker == "dot") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(dot_volume)
+
+```
+
+
+```{r}
+# eth
+
+eth_volume <-
+  crypto_volume %>%
+  filter(ticker == "eth") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(eth_volume)
+
+```
+
+
+```{r}
+# sol
+
+sol_volume <-
+  crypto_volume %>%
+  filter(ticker == "sol") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(sol_volume)
+
+```
+
+
+```{r}
+# usdc
+
+usdc_volume <-
+  crypto_volume %>%
+  filter(ticker == "usdc") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(usdc_volume)
+
+```
+
+
+```{r}
+# usdt
+
+usdt_volume <-
+  crypto_volume %>%
+  filter(ticker == "usdt") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(usdt_volume)
+
+```
+
+
+```{r}
+# xrp
+
+xrp_volume <-
+  crypto_volume %>%
+  filter(ticker == "xrp") %>%
+  pivot_wider(names_from = ticker, values_from = total_volume_bil, values_fill = NA)
+
+generate_plot(xrp_volume)
+
+```
+
+
+Merge individual crypto trading data together and calculate correlation.
+
+```{r}
+
+crypto_merged <-
+Reduce(function(...) merge(..., all=TRUE), list(ada_volume, bnb_volume, btc_volume, doge_volume, 
+                                                dot_volume, eth_volume, sol_volume, usdc_volume,
+                                                usdt_volume, xrp_volume))
+
+get_correlation(crypto_merged, "Correlation of Top 10 Market Cap Crypto")
+
+```
+
+
+
+
+
+## Cross Market Correlation
+
+```{r}
+
+treasury_total <-
+  treasury_trading %>%
+  select(date, total) %>%
+  rename("treasury_total" = "total")
+
+equity_total <-
+  equity_trading %>%
+  select(date, market) %>%
+  rename("equity_total" = "market")
+
+fix_income_total <-
+  fix_income_trading %>%
+  select(date, total) %>%
+  rename("fi_total" = "total")
+
+sf_total <-
+  sf_trading_monthly %>%
+  select(date, grand_total_m) %>%
+  rename("sf_total" = "grand_total_m")
+
+agency_total <-
+  agency_trading %>%
+  select(date, total) %>%
+  rename("agency_total" = "total")
+
+corp_bond_total <-
+  corp_bond_trading %>%
+  mutate(corp_bond_total = select(., pt_total,total_144a,nc_total,c_total) %>% rowSums(na.rm = TRUE)) %>%
+  select(date, corp_bond_total)
+
+crypto_total <-
+  crypto_merged %>%
+  mutate(crypto_total = select(., -date) %>% rowSums(na.rm = TRUE)) %>%
+  select(date, crypto_total)
+  
+
+cross_market_total <-
+  Reduce(function(...) merge(..., all=TRUE), list(treasury_total, equity_total, fix_income_total,
+                                                  sf_total, agency_total, corp_bond_total,
+                                                  crypto_total))
+
+
+get_correlation(cross_market_total, "Cross Market Correlation of Trading Volume")
+
+
+```
+
+
+
+
+
+
+
+
+
+# Possible way to double Y axis.
+Limitation: Second Y axis is the same scale with the primary.
+
+```{r}
+  # plot_data <-
+  #   
+  # my_df %>%
+  # ggplot() +
+  # geom_boxplot(aes_string(x = my_df$datadate, y = col_1, group = my_df$fyear)) + 
+  #  geom_line(data = kc_fin_stress, aes(x = date, y = kcfsi), color = "blue") +
+  #  scale_y_continuous(sec.axis = sec_axis(~., name = "kcfsi")) +
+  # 
+  # labs(title = paste(col_1, " and Kansas City Financial Stress Index over year"),
+  #      x = "year")
+  # theme_classic()
+  # 
+  # 
+  # 
+  # return (plot_result)
+
+```

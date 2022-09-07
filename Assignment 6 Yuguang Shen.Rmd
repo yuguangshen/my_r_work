@@ -1,0 +1,790 @@
+---
+title: "MGT 6090 Assignment 6"
+author: "Yuguang Shen"
+date: "October 8, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(corrplot)
+library(data.table)
+library(gt)
+library(knitr)
+library(broom)
+library(slider)
+library(sandwich)
+library(lmtest)
+
+```
+
+# 1. Useful functions 
+
+## Beta calculation functions
+
+```{r}
+
+# Calculate beta, using cov and var
+
+calc_beta <- function(my_df)
+{
+  result <- cov(my_df$ret_rf, my_df$mkt_rf) / var(my_df$mkt_rf)
+  
+  return (result)
+}
+
+# Winsorized version
+
+calc_beta_w <- function(my_df)
+{
+  result <- cov(my_df$ret_rf_w, my_df$mkt_rf) / var(my_df$mkt_rf)
+  
+  return (result)
+}
+
+# Calculate beta for longer period
+
+rolling_beta <- function(my_dt) 
+{
+  
+result <-
+  slide_period_vec(.x = my_dt, .i = my_dt$year, .period = "year", .f = function(my_dt){calc_beta(my_dt)}, .before = 1,   .complete = TRUE)
+
+return (result)
+
+}
+
+
+rolling_beta_2 <- function(my_dt) 
+{
+  
+result <-
+  slide_period_vec(.x = my_dt, .i = my_dt$year, .period = "year", .f = function(my_dt){calc_beta(my_dt)}, .before = 2,   .complete = TRUE)
+
+return (result)
+
+}
+
+
+rolling_beta_w <- function(my_dt) 
+{
+  
+result <-
+  slide_period_vec(.x = my_dt, .i = my_dt$year, .period = "year", .f = function(my_dt){calc_beta_w(my_dt)}, .before =    1, .complete = TRUE)
+
+return (result)
+
+}
+
+```
+
+## Usefule functions for statistics
+
+```{r}
+
+# Function to get n, mean, sd, ect
+
+get_stats <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_n" = ~n(),
+                        "_mean" = ~mean(., na.rm = TRUE), 
+                        "_sd" = ~sd(., na.rm = TRUE),
+                        "_skew" = ~skewness(., na.rm = TRUE),
+                        "_kurt" = ~kurtosis(., na.rm = TRUE),
+                        "_min" = ~min(., na.rm = TRUE),
+                        "_max" = ~max(., na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "n, mean, sd, skewness, kurtosis, min, max") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean:max, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+# Function to get percentiles
+
+get_percentiles <- function(my_df, col_0 = NULL, col_1) {
+  
+  
+  stats_table <-
+    my_df %>%
+    group_by(across(all_of(col_0))) %>%
+    summarise(across(all_of(col_1), 
+                   list("_P1" = ~quantile(.,0.01, na.rm = TRUE),
+                        "_P5" = ~quantile(.,0.05, na.rm = TRUE),
+                        "_P25" = ~quantile(.,0.25, na.rm = TRUE),
+                        "_P50" = ~quantile(.,0.5, na.rm = TRUE),
+                        "_P75" = ~quantile(.,0.75, na.rm = TRUE),
+                        "_P95" = ~quantile(.,0.95, na.rm = TRUE),
+                        "_P99" = ~quantile(.,0.99, na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(-c(all_of(col_0)), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+    
+    gt(rowname_col = col_0[1], groupname_col = "var") %>%
+    
+    tab_header(title = "Descriptive Statistics",
+               subtitle = "percentiles") %>%
+    
+    tab_stubhead(label = col_0[1]) %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = P1:P99, decimals = 4) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+  return (stats_table)
+  
+}
+
+```
+
+# 2. Load DSF and MSF data
+
+```{r, message=FALSE, warning=FALSE}
+
+dsf <- 
+  fread("dsf_new.csv", select = c("PERMNO", "DATE", "RET", "VWRETD")) %>%
+  filter(DATE >= 19940101) %>%
+  clean_names() %>%
+  mutate(date = ymd(date),
+         ret = as.numeric(ret))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+msf <-
+  fread("msf_new2.csv", select = c("PERMNO", "DATE", "RET", "VWRETD", "PRC", "SHROUT")) %>%
+  filter(DATE >= 19930101) %>%
+  clean_names() %>%
+  mutate(date = ymd(date),
+         ret = as.numeric(ret),
+         date = ceiling_date(date, "months") - 1,
+         prc = abs(prc),
+         mktcap = prc * shrout * 1000 / 1000000)
+
+```
+
+# 3. Calculate excess return for DSF and MSF dataset
+
+## Load risk free rate data from Kenneth French data library
+
+```{r, message=FALSE, warning=FALSE}
+
+# Risk free rate in Kenneth French library is %. 
+# Thus, it needs to be divided by 100 to match DSF and MSF
+
+rf_monthly <-
+  read_csv("F-F_Research_Data_Factors.csv", skip = 3) %>%
+  rename("date" = "X1") %>%
+  filter(date > 2020) %>%
+  mutate(date = ymd(paste(date, "01"))) %>%
+  mutate(date = ceiling_date(date, "months") - 1) %>%
+  clean_names() %>%
+  select(date, rf) %>%
+  filter(date >= "1993-01-01") %>%
+  mutate(rf = rf / 100)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+rf_daily <-
+  read_csv("F-F_Research_Data_Factors_daily.csv", skip = 4) %>%
+  rename("date" = "X1") %>%
+  clean_names() %>%
+  select(date, rf) %>%
+  mutate(date = ymd(date),
+         rf = rf / 100) %>%
+  filter(date >= "1994-01-01")
+
+```
+
+## Calculate excess return over risk free rate
+
+```{r}
+
+dsf <-
+  left_join(dsf, rf_daily, by = c("date" = "date"))
+
+```
+
+```{r}
+
+msf <-
+  left_join(msf, rf_monthly, by = c("date" = "date"))
+
+```
+
+```{r}
+
+dsf <-
+  dsf %>%
+  mutate(ret = ret - rf,
+         vwretd = vwretd - rf) %>%
+  rename("ret_rf" = "ret",
+         "mkt_rf" = "vwretd") %>%
+  select(-rf)
+
+```
+
+```{r}
+
+msf <-
+  msf %>%
+  mutate(ret = ret - rf,
+         vwretd = vwretd - rf) %>%
+  rename("ret_rf" = "ret",
+         "mkt_rf" = "vwretd") %>%
+  select(-rf)
+  
+```
+
+## Add column "year" to DSF and MSF
+
+```{r}
+
+dsf <-
+
+  dsf %>%
+  mutate(year = ceiling_date(date, "year") - 1) %>%
+  relocate(year, .after = date) %>%
+  na.omit()
+
+```
+
+```{r}
+
+msf <-
+ msf %>%
+  mutate(year = ceiling_date(date, "year") - 1) %>%
+  relocate(year, .after = date) %>%
+  na.omit()
+
+```
+
+# 4. Estimate beta 
+
+## 4.1 Beta using DSF
+
+```{r}
+
+# 1 month beta using DSF
+
+dsf_betas <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(1), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_1m = calc_beta(cur_data())) %>%
+  filter(year >= ymd("1995-12-31")) %>%
+  select(permno, year, beta_1m) %>%
+  distinct()
+
+```
+
+```{r}
+
+# 3 month beta using DSF
+
+dsf_betas <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(3), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_3m = calc_beta(cur_data())) %>%
+  select(permno, year, beta_3m) %>%
+  distinct() %>%
+  left_join(dsf_betas, ., by = c("permno" = "permno", "year" = "year"))
+
+```
+
+```{r}
+
+# 6 month beta using DSF
+
+dsf_betas <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(6), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_6m = calc_beta(cur_data())) %>%
+  select(permno, year, beta_6m) %>%
+  distinct() %>%
+  left_join(dsf_betas, ., by = c("permno" = "permno", "year" = "year"))
+
+```
+
+```{r}
+
+# 12 month beta using DSF
+
+dsf_betas <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(12), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_12m = calc_beta(cur_data())) %>%
+  select(permno, year, beta_12m) %>%
+  distinct() %>%
+  left_join(dsf_betas, ., by = c("permno" = "permno", "year" = "year"))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# 24 month beta using DSF
+
+dsf_beta_24m <- 
+  dsf %>%
+  group_by(permno) %>%
+  summarise(beta_24m = rolling_beta(cur_data()%>%group_by(year)),
+            my_year = unique(year)) %>%
+  na.omit()
+
+```
+
+### Combine dsf betas
+
+```{r}
+
+dsf_betas <-
+
+left_join(dsf_betas, dsf_beta_24m, by = c("permno" = "permno", "year" = "my_year"))
+
+```
+
+## 4.2 Beta using MSF dataset
+
+```{r}
+
+# 12 month beta using MSF
+
+msf_betas <-
+
+msf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(12), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_1y = calc_beta(cur_data())) %>%
+  filter(year >= ymd("1995-12-31")) %>%
+  select(permno, year, beta_1y) %>%
+  distinct()
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# 24 month beta using MSF
+
+msf_beta_2y <-
+
+msf %>%
+  group_by(permno) %>%
+  summarise(beta_2y = rolling_beta(cur_data()%>%group_by(year)),
+            my_year = unique(year)) %>%
+  na.omit()
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# 36 month beta using MSF
+
+msf_beta_3y <-
+
+msf %>%
+  group_by(permno) %>%
+  summarise(beta_3y = rolling_beta_2(cur_data()%>%group_by(year)),
+            my_year = unique(year)) %>%
+  na.omit()
+
+```
+
+### Combine msf betas
+
+```{r}
+msf_betas <-
+  
+left_join(msf_betas, msf_beta_2y, by = c("permno" = "permno", "year" = "my_year") ) %>%
+  left_join(., msf_beta_3y, by = c("permno" = "permno", "year" = "my_year")) 
+
+```
+
+## 4.3 Beta using winsorized DSF dataset
+
+### Winsorize DSF dataset
+
+```{r}
+
+dsf <-
+  
+dsf %>%
+  mutate(ret_rf_w = case_when(mkt_rf>0 & ret_rf>4*mkt_rf ~ 4*mkt_rf,
+                              mkt_rf>0 & ret_rf<(-2)*mkt_rf ~ (-2)*mkt_rf,
+                              mkt_rf<0 & ret_rf>(-2)*mkt_rf ~ (-2)*mkt_rf,
+                              mkt_rf<0 & ret_rf<4*mkt_rf ~ 4*mkt_rf,
+                              TRUE ~ ret_rf))
+
+```
+
+### Winsorize betas
+
+```{r}
+
+# 1 month beta using winsorized DSF
+
+dsf_betas_w <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(1), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_1m = calc_beta_w(cur_data())) %>%
+  filter(year >= ymd("1995-12-31")) %>%
+  select(permno, year, beta_1m) %>%
+  distinct()
+
+dsf_betas_w <-
+  dsf_betas_w %>%
+  rename("beta_1m_w" = "beta_1m")
+
+```
+
+```{r}
+
+# 3 month beta using winsorized DSF
+
+dsf_betas_w <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(3), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_3m_w = calc_beta_w(cur_data())) %>%
+  select(permno, year, beta_3m_w) %>%
+  distinct() %>%
+  left_join(dsf_betas_w, ., by = c("permno" = "permno", "year" = "year"))
+
+```
+
+```{r}
+
+# 6 month beta using winsorized DSF
+
+dsf_betas_w <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(6), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_6m_w = calc_beta_w(cur_data())) %>%
+  select(permno, year, beta_6m_w) %>%
+  distinct() %>%
+  left_join(dsf_betas_w, ., by = c("permno" = "permno", "year" = "year"))
+
+```
+
+```{r}
+
+# 12 month beta using winsorized DSF
+
+dsf_betas_w <-
+
+dsf %>%
+  group_by(permno) %>%
+  filter(date %within% interval(year %m-% months(12), year)) %>%
+  group_by(permno, year) %>%
+  mutate(beta_12m_w = calc_beta_w(cur_data())) %>%
+  select(permno, year, beta_12m_w) %>%
+  distinct() %>%
+  left_join(dsf_betas_w, ., by = c("permno" = "permno", "year" = "year"))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# 24 month beta using winsorized DSF
+
+dsf_beta_24m_w <-
+  dsf %>%
+  group_by(permno) %>%
+  summarise(beta_24m_w = rolling_beta_w(cur_data()%>%group_by(year)),
+            my_year = unique(year)) %>%
+  na.omit()
+  
+```
+
+### Combine winsorized beta files
+
+```{r}
+
+dsf_betas_w <-
+
+left_join(dsf_betas_w, dsf_beta_24m_w, by = c("permno" = "permno", "year" = "my_year"))
+
+```
+
+## 4.4 Combine dsf, msf, and winsorized dsf betas
+
+```{r}
+
+betas <-
+  left_join(dsf_betas, dsf_betas_w, by = c("permno" = "permno", "year" = "year")) %>%
+  left_join(., msf_betas, by = c("permno" = "permno", "year" = "year"))
+  
+```
+
+# 5. Descriptive statistics for betas
+
+```{r}
+
+columns_of_interest <-
+  betas %>%
+  ungroup() %>%
+  select(-c(permno, year)) %>%
+  colnames()
+ 
+get_stats(betas, NULL, columns_of_interest)
+ 
+get_percentiles(betas, NULL, columns_of_interest)
+ 
+```
+
+# 6. Correlation of betas
+
+```{r}
+
+betas %>%
+  ungroup() %>%
+  select(beta_1m:beta_3y) %>%
+  cor(use="complete.obs") %>%
+  corrplot(method = "pie",
+           order = "AOE",
+           tl.cex = 0.6,
+           title = "Correlation of Betas",
+           number.cex = 0.6,
+           addCoef.col = 'black',
+           mar=c(0,0,1,0))
+
+```
+
+# 7. CAPM, beta and stock return
+
+## Deciles of beta (choose beta_24m_w)
+
+```{r}
+
+beta_deciles <-
+  
+  betas %>%
+  select(permno, year, beta_24m_w) %>%
+  ungroup() %>%
+  mutate(beta_rank = ntile(beta_24m_w, 10))
+
+```
+
+
+```{r}
+
+# Avg beta, avg return
+
+yearly_return_data <-
+  
+msf %>%
+  group_by(permno, year) %>%
+  summarise(avg_ret = mean(ret_rf),
+            avg_cap = mean(mktcap),
+            avg_mkt_ret = mean(mkt_rf)) %>%
+  left_join(., beta_deciles, by = c("permno" = "permno", "year" = "year")) %>%
+  na.omit()
+
+```
+## Equal weighted
+
+```{r, message=FALSE, warning=FALSE}
+
+equal_weighted <-
+  
+yearly_return_data %>%
+  group_by(beta_rank, year) %>%
+  summarise(portfolio_return = mean(avg_ret),
+            mkt_return = mean(avg_mkt_ret),
+            portfolio_beta = mean(beta_24m_w))
+
+```
+
+
+```{r}
+
+equal_weighted_summary <-
+  equal_weighted %>%
+  group_by(beta_rank) %>%
+  summarise(return_summary = mean(portfolio_return),
+            beta_summary = mean(portfolio_beta))
+
+gt(equal_weighted_summary) %>%
+   tab_header(title = "Summary for Equal Weighted Portfolios")
+
+```
+
+## Value weighted
+
+```{r, message=FALSE, warning=FALSE}
+
+value_weighted <-
+  
+yearly_return_data %>%
+  group_by(beta_rank, year) %>%
+  summarise(portfolio_return = sum(avg_ret*avg_cap/sum(avg_cap)),
+            mkt_return = mean(avg_mkt_ret),
+            portfolio_beta = sum(beta_24m_w*avg_cap/sum(avg_cap))) 
+
+
+```
+
+```{r}
+
+value_weighted_summary <-
+  value_weighted %>%
+  group_by(beta_rank) %>%
+  summarise(return_summary = mean(portfolio_return),
+            beta_summary = mean(portfolio_beta))
+
+gt(value_weighted_summary) %>%
+   tab_header(title = "Summary for Value Weighted Portfolios")
+
+```
+
+
+# 8. Hypothesis test
+
+## Equal weighted portfolio hypothesis test
+
+```{r}
+
+print("Hypothesis test for Equal Weighted portfolio:")
+
+for (i in 1:10)
+{
+  temp_portfolio <-
+    equal_weighted %>%
+    filter(beta_rank == i)
+  
+  
+  nw_vcov <-
+    NeweyWest(lm(temp_portfolio$portfolio_return ~ temp_portfolio$mkt_return),
+              lag = 5, prewhite = FALSE,
+              adjust = TRUE)
+  
+  temp_model <-
+    lm(temp_portfolio$portfolio_return ~ temp_portfolio$mkt_return)
+  
+  model_adjusted <-
+    coeftest(temp_model, vcov = nw_vcov)
+  
+  print("For beta_rank = ")
+  print(i)
+  print(model_adjusted)
+  
+}
+
+
+
+```
+
+## Value weighted portfolio hypothesis test
+
+```{r}
+
+print("Hypothesis test for Value Weighted Portfolio: ")
+
+for (i in 1:10)
+{
+  temp_portfolio <-
+    value_weighted %>%
+    filter(beta_rank == i)
+  
+  
+  nw_vcov <-
+    NeweyWest(lm(temp_portfolio$portfolio_return ~ temp_portfolio$mkt_return),
+              lag = 5, prewhite = FALSE,
+              adjust = TRUE)
+  
+  temp_model <-
+    lm(temp_portfolio$portfolio_return ~ temp_portfolio$mkt_return)
+  
+  model_adjusted <-
+    coeftest(temp_model, vcov = nw_vcov)
+  
+  print("For beta_rank = ")
+  print(i)
+  print(model_adjusted)
+  
+}
+
+
+
+```
+
+

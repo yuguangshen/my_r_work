@@ -1,0 +1,832 @@
+---
+title: "MGT 6090 Assignment 7"
+author: "Yuguang Shen"
+date: "October 20, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(data.table)
+library(gt)
+library(knitr)
+library(broom)
+library(slider)
+library(lmtest)
+
+```
+
+# 0. Pre-process of funda data 
+
+The original funda data is pre-processed using SAS. Only the columns used in this assignment are kept. The data is also filtered by fiscal year, since we are only interested data from 1970 onwards.
+
+# 1. Fundamental variables
+
+## Load the fundamental data
+
+```{r, message=FALSE, warning=FALSE}
+
+fundamentals <-
+  fread("funda_HW7.csv", select = c("cusip", "datadate", "fyear", "scf", "at", "oancf",
+                                    "ivncf", "fincf", "revt", "sale", "dv", "capx", "ivch",
+                                    "aqc", "fuseo", "sppe", "siv", "ivstch", "ivaco", "ni", "act",
+                                    "lct", "re", "oiadp", "prcc_f", "csho", "lt", "pi", "dp",
+                                    "ibc", "xidoc", "dpc", "txdc", "esubc", "sppiv", "fopo",
+                                    "fsrco", "exre")) 
+
+```
+
+## Lag the accounting data by one year
+
+When calculating certain financial ratios, such as Asset Turnover and the I term of Ohlson_O score, two years of values about Total Asset and Net Income are needed. Therefore, lag by two year is also needed for these two columns. For all the other columns, lag by one year is sufficient.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Lag the accounting data 
+
+fundamentals <-
+  
+fundamentals %>%
+  filter(scf == 1 | scf == 2  | scf == 3 | scf == 7) %>%
+  mutate(datadate = ymd(datadate),
+         datadate = floor_date(datadate, "year")) %>%
+  group_by(cusip) %>%
+  mutate(across(at:exre, ~ lag(.), .names = "{.col}_lag")) %>%
+  mutate(ni_lag2 = lag(ni_lag),
+         at_lag2 = lag(at_lag)) 
+  
+```
+
+## Calculate fundemantal variables
+
+```{r}
+
+# Create more variables to calculate Ohlson_O score
+
+fundamentals <-
+
+fundamentals %>%
+  mutate(Ohlson_O_G = case_when(lt_lag > at_lag ~ 1,
+                                TRUE ~ 0),
+         Ohlson_O_H = case_when(ni_lag < 0 & ni_lag2 < 0 ~ 1,
+                                TRUE ~ 0),
+         Ohlson_O_I = (ni_lag - ni_lag2) / (abs(ni_lag) + abs(ni_lag2)))
+ 
+
+```
+
+```{r}
+
+# Calculate fundamental variables
+
+fundamentals <-
+  
+fundamentals %>%
+  mutate(bk = at_lag,
+         cf = case_when(scf == 7 ~ ibc_lag + xidoc_lag + dpc_lag + txdc_lag + esubc_lag + sppiv_lag + fopo_lag + exre_lag,
+                         TRUE ~ ibc_lag + xidoc_lag + dpc_lag + txdc_lag + esubc_lag + sppiv_lag + fopo_lag + fsrco_lag),
+         rev = revt_lag,
+         sales = sale_lag,
+         div = dv_lag,
+         inv = case_when(scf == 7 ~ capx_lag + ivch_lag + aqc_lag - sppe_lag - siv_lag - ivstch_lag - ivaco_lag,
+                        TRUE ~ capx_lag + ivch_lag + aqc_lag + fuseo_lag - sppe_lag - siv_lag),
+         prof = ni_lag / at_lag,
+         ato = sale_lag / (0.5*(at_lag + at_lag2)),
+         altman_z = 1.2*(act_lag-lct_lag)/at_lag + 1.4*re_lag/at_lag + 3.3*oiadp_lag/at_lag 
+                   + 0.6*prcc_f_lag*csho_lag/lt_lag + 0.99*sale_lag/at_lag,
+         ohlson_o = -1.32 - 0.407*log(at_lag) + 6.03*lt_lag/at_lag - 1.43*(act_lag-lct_lag)/at_lag 
+                   + 0.0757*lct_lag/act_lag - 2.37*ni_lag/at_lag-1.83*(pi_lag+dp_lag)/lt_lag - 1.72*Ohlson_O_G                                   + 0.285*Ohlson_O_H - 0.521*Ohlson_O_I                      
+         ) 
+  
+```
+
+
+```{r}
+
+# Create new dataset for fundamental variables
+
+funda_vars <-
+
+fundamentals %>%
+  select(cusip, datadate, fyear, bk, cf, rev, sales, div, inv, prof, ato, altman_z, ohlson_o) %>%
+  group_by(cusip) %>%
+  mutate(cf_5y = rollmean(cf, k = 5, align = "right", fill = NA),
+         rev_5y = rollmean(rev, k = 5, align = "right", fill = NA),
+         sales_5y = rollmean(sales, k = 5, align = "right", fill = NA),
+         div_5y = rollmean(div, k = 5, align = "right", fill = NA),
+         inv_5y = rollmean(inv, k = 5, align = "right", fill = NA),
+         prof_5y = rollmean(prof, k = 5, align = "right", fill = NA))
+ 
+```
+
+
+# 2. Market variables
+
+## Functions to calculate beta
+
+```{r}
+
+calc_beta <- function(my_df)
+{
+  result <- cov(my_df$ret_rf, my_df$mkt_rf) / var(my_df$mkt_rf)
+  
+  return (result)
+}
+
+rolling_beta <- function(my_dt) 
+{
+  
+result <-
+  slide_period_vec(.x = my_dt, .i = my_dt$year, .period = "year", .f = function(my_dt){calc_beta(my_dt)}, .before = 1,   .complete = TRUE)
+
+return (result)
+
+}
+
+```
+
+## Load MSF data
+
+```{r, message=FALSE, warning=FALSE}
+
+# Convert ret and vwretd to percentage %. This makes it easier to compare with F-F data, which reports data in percentage %.
+# Market cap will be in millions.
+
+msf <-
+  fread("msf_new2.csv", select = c("CUSIP", "DATE", "RET", "VWRETD", "PRC", "ALTPRC", "SHROUT" )) %>%
+  filter(DATE >= 19700101) %>%
+  clean_names() %>%
+  mutate(date = ymd(date),
+         ret = as.numeric(ret),
+         date = floor_date(date, "months"),
+         prc = abs(prc),
+         altprc = abs(altprc),
+         prc = case_when(is.na(prc) & !is.na(altprc) ~ altprc,
+                         TRUE ~ prc),
+         mktcap = prc * shrout * 1000 / 1000000
+        ) %>%
+  mutate(ret = ret * 100,
+         vwretd = vwretd * 100) %>%
+  na.omit() %>%
+  select(-c(altprc, shrout))
+
+```
+
+## Download F-F data
+
+```{r, message=FALSE, warning=FALSE}
+
+my_url <- "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip"
+
+my_file <- tempfile()
+
+download.file(my_url, my_file)
+
+ff_factors_data <- read_csv(unzip(my_file), skip = 3)
+
+```
+
+## Filter and mutate F-F 3 factor data
+
+```{r}
+
+ff_factors_data_reduced <-
+  
+ff_factors_data %>%
+  rename("date" = "X1") %>%
+  clean_names() %>%
+  filter(date >= 197001) %>%
+  mutate(date = ymd(paste(date, "01"))) 
+
+```
+
+## Combine msf and F-F 3 factor data
+
+```{r}
+
+# Combine msf and F-F data. Add a "year" column. 
+
+msf_ff <-
+
+  left_join(msf, ff_factors_data_reduced, by = c("date" = "date")) %>%
+  mutate(ret_rf = ret - rf) %>%
+  mutate(year = floor_date(date, "year")) %>%
+  relocate(year, .after = date)
+
+
+```
+
+## Download F-F Momentum data
+
+```{r, message=FALSE, warning=FALSE}
+
+mom_url <- "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip"
+
+mom_file <- tempfile()
+
+download.file(mom_url, mom_file)
+
+ff_mom_data <- read_csv(unzip(mom_file), skip = 13)
+
+```
+
+## Filter and mutate F-F Momentum data
+
+```{r}
+
+ff_mom_data_reduced <-
+  
+ff_mom_data %>%
+  rename("date" = "X1") %>%
+  clean_names() %>%
+  filter(date >= 197001) %>%
+  mutate(date = ymd(paste(date, "01"))) %>%
+  na.omit()
+
+```
+
+## Furthur ombine msf_ff and F-F Momentum data
+
+```{r}
+
+# Combine msf_ff and F-F Momentum data
+
+msf_ff <-
+
+  left_join(msf_ff, ff_mom_data_reduced, by = c("date" = "date"))
+  
+```
+
+## Lag msf_ff data by one month
+
+```{r}
+
+msf_ff <-
+
+msf_ff %>%
+  group_by(cusip) %>%
+  mutate(ret = lag(ret),
+         mkt_rf = lag(mkt_rf),
+         smb = lag(smb),
+         hml = lag(hml),
+         rf = lag(rf),
+         ret_rf = lag(ret_rf),
+         vwretd = lag(vwretd),
+         prc = lag(prc),
+         mktcap = lag(mktcap),
+         mom = lag(mom)
+         )
+
+```
+
+## Calculate Beta
+
+```{r, message=FALSE, warning=FALSE}
+
+msf_beta <-
+
+msf_ff %>%
+  group_by(cusip) %>%
+  summarise(beta_24m = rolling_beta(cur_data()%>%group_by(year)),
+            my_year = unique(year))
+
+
+```
+
+## Calculate Vol
+
+```{r, message=FALSE, warning=FALSE}
+
+# Return is already in percentage %, does not need to multiply by 100
+
+msf_vol <-
+
+msf_ff %>%
+  group_by(cusip, year) %>%
+  summarise(vol = sd(ret, na.rm = TRUE)*sqrt(12))
+
+```
+
+## Calculate another volatility, Vol_0, assuming mean = 0
+
+```{r, message=FALSE, warning=FALSE}
+
+msf_vol0 <-
+
+msf_ff %>%
+  mutate(ret_sqr = ret * ret) %>%
+  group_by(cusip, year) %>%
+  summarise(vol_0 = sd(ret_sqr, na.rm = TRUE)*sqrt(12))
+  
+```
+
+## Join the data together to form market variables
+
+```{r}
+
+market_vars <-
+
+left_join(msf_vol, msf_vol0, by = c("cusip" = "cusip", "year" = "year")) %>%
+  left_join(., msf_beta, by = c("cusip" = "cusip", "year" = "my_year")) %>%
+  na.omit() 
+
+```
+
+# 3. Idiosyncratic volatility
+
+## CAPM
+
+```{r}
+
+capm_models <-
+  
+msf_ff %>%
+  select(cusip, ret_rf, mkt_rf) %>%
+  group_by(cusip) %>%
+  na.omit() %>%
+  nest() %>%
+  mutate(models = map(data, ~ lm(ret_rf ~ mkt_rf, data = .x)),
+         tidied = map(models, glance)
+         ) %>%
+  unnest(tidied) %>%
+  select(cusip, sigma) %>%
+  mutate(capm_IdioVol = sigma * sqrt(12)) %>%
+  rename("capm_RSE" = "sigma")
+
+```
+
+## F-F 3 factor model
+
+```{r}
+
+ff3_models <-
+
+msf_ff %>%
+  select(cusip, ret_rf, mkt_rf, smb, hml) %>%
+  group_by(cusip) %>%
+  na.omit() %>%
+  nest() %>%
+  mutate(models = map(data, ~ lm(ret_rf ~ mkt_rf + smb + hml, data = .x)),
+         tidied = map(models, glance)
+         ) %>%
+  unnest(tidied) %>%
+  select(cusip, sigma) %>%
+  mutate(ff3_IdioVol = sigma * sqrt(12)) %>%
+  rename("ff3_RSE" = "sigma")
+
+```
+
+## F-F 3 Momentum model
+
+```{r}
+
+ff3_mom_models <-
+
+msf_ff %>%
+  select(cusip, ret_rf, mkt_rf, smb, hml, mom) %>%
+  group_by(cusip) %>%
+  na.omit() %>%
+  nest() %>%
+  mutate(models = map(data, ~ lm(ret_rf ~ mkt_rf + smb + hml + mom, data = .x)),
+         tidied = map(models, glance)
+         ) %>%
+  unnest(tidied) %>%
+  select(cusip, sigma) %>%
+  mutate(ff3_mom_IdioVol = sigma * sqrt(12)) %>%
+  rename("ff3_mom_RSE" = "sigma")
+
+```
+
+## Output part of the RSE and IdioVol calculation result
+
+```{r}
+
+# Output first 20 rows
+
+left_join(head(capm_models, 20), head(ff3_models, 20), by = c("cusip" = "cusip")) %>%
+  left_join(., head(ff3_mom_models, 20), by = c("cusip" = "cusip")) %>%
+  gt(groupname_col = "cusip") %>%
+    tab_header(title = "Monthly Portfolio Performance",
+               subtitle = "mean, sd, skewness, kurtosis, Sharpe, Informatio Ratio") %>%
+    cols_align(align = "center", columns = everything()) %>%
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+    )
+
+
+```
+
+# 4. Portfolio construction based on fundamental variables
+
+## Modify cusip to first 7 digits for all datasets
+
+```{r}
+
+funda_vars <-
+funda_vars %>%
+  mutate(cusip_7 = str_sub(cusip, 1, 7)) %>%
+  relocate(cusip_7, .after = cusip)
+
+market_vars <-
+market_vars %>%
+  mutate(cusip_7 = str_sub(cusip, 1, 7)) %>%
+  relocate(cusip_7, .after = cusip)
+
+msf_ff <-
+msf_ff %>%
+  mutate(cusip_7 = str_sub(cusip, 1, 7)) %>%
+  relocate(cusip_7, .after = cusip)
+
+```
+
+## Find eligible stocks for each year
+
+```{r}
+
+# Group by cusip and year
+# Pick the first row of each company in each year
+# Eligibility will depend on the stocks first trading data in each year
+
+eligible_stocks <-
+
+setDT(na.omit(msf_ff))[, .SD[1], by = .(cusip_7, year)] %>%
+  mutate(eligible = case_when(prc > 5 & mktcap > 100 ~ 1,
+                              TRUE ~ 0)) %>% 
+  select(cusip_7, year, eligible)
+
+```
+
+## Construct various fundamental portfolios
+
+```{r}
+
+# Pick eligible stocks
+
+funda_portfolios <-
+
+left_join(funda_vars, eligible_stocks, by = c("cusip_7" = "cusip_7", "datadate" = "year")) %>%
+  filter(eligible == 1) %>% 
+  ungroup() %>%
+  select(cusip_7, datadate, bk, cf_5y, rev_5y, sales_5y, div_5y, inv_5y, prof_5y, ato, altman_z, ohlson_o, eligible)
+  
+```
+
+```{r}
+
+# Any Inf must be replaced by NA before calculating weights. Otherwise you'll get 0 weight. 
+# Replace Inf in data by NA
+
+funda_portfolios <- do.call(data.frame,                     
+                   lapply(funda_portfolios,
+                          function(x) replace(x, is.infinite(x), NA)))
+
+```
+
+```{r}
+# Calculate weight of each stock in various portfolios
+
+funda_portfolios <-
+
+funda_portfolios %>%
+  group_by(datadate) %>% 
+  mutate(across(bk:ohlson_o, ~ ./sum(.,na.rm = TRUE), .names = "{.col}_wt"))
+
+```
+
+## Join fundamental portfolios with return data
+
+```{r}
+
+funda_portfolio_return <-
+
+inner_join(msf_ff, funda_portfolios, by = c("cusip_7" = "cusip_7", "year" = "datadate")) %>%
+  select(cusip_7, date, year, ret, vwretd, mkt_rf, smb, hml, rf, bk_wt:ohlson_o_wt)
+
+```
+
+
+## Calculate monthly return for fundamental portfolios
+
+```{r}
+
+monthly_ret_funda_portfolios <-
+
+funda_portfolio_return %>%
+  arrange(date) %>%
+  group_by(date) %>%
+  summarise(across(bk_wt:ohlson_o_wt, ~ if(all(is.na(.))) NA else sum(. * ret, na.rm = TRUE), .names = "{.col}_ret"))
+
+```
+
+# 6. Portfolio construction based on market variables
+
+## Construct portfolios based on market variables
+
+```{r}
+
+# Pick eligible stocks
+
+market_portfolios <-
+left_join(market_vars, eligible_stocks, by = c("cusip_7" = "cusip_7", "year" = "year")) %>%
+  filter(eligible == 1) %>% 
+  ungroup() %>%
+  select(-cusip)
+ 
+```
+
+```{r}
+
+# Any Inf must be replaced by NA before calculating weights. Otherwise you'll get 0 weight. 
+# Replace Inf in data by NA
+
+market_portfolios <- do.call(data.frame,                     
+                   lapply(market_portfolios,
+                          function(x) replace(x, is.infinite(x), NA)))
+
+```
+
+```{r}
+# Calculate weight of each stock in various portfolios
+
+market_portfolios <-
+
+market_portfolios %>%
+  group_by(year) %>% 
+  mutate(across(vol:beta_24m, ~ ./sum(.,na.rm = TRUE), .names = "{.col}_wt"))
+
+```
+
+## Join market portfolios with return data
+
+```{r}
+
+market_portfolio_return <-
+  
+inner_join(msf_ff, market_portfolios, by = c("cusip_7" = "cusip_7", "year" = "year")) %>%
+  select(cusip_7, date, year, ret, vwretd, mkt_rf, smb, hml, rf, vol_wt:beta_24m_wt)
+  
+```
+
+
+## Calculate monthly return for market portfolios
+
+```{r}
+
+monthly_ret_market_portfolios <-
+  
+market_portfolio_return %>%
+  arrange(date) %>%
+  group_by(date) %>%
+  summarise(across(vol_wt:beta_24m_wt, ~ if(all(is.na(.))) NA else sum(. * ret, na.rm = TRUE), .names = "{.col}_ret"))
+
+```
+
+
+# 7. Portfolio analysis and visualization
+
+## Prepare  Recession shade
+
+Credit to QCF Bootcamp R lectures
+
+```{r}
+
+recessions_tribble <- tribble(
+  ~Peak,             ~Trough,
+  ymd("1948-11-01"), ymd("1949-10-01"),
+  ymd("1953-07-01"), ymd("1954-05-01"),
+  ymd("1957-08-01"), ymd("1958-04-01"),
+  ymd("1960-04-01"), ymd("1961-02-01"),
+  ymd("1969-12-01"), ymd("1970-11-01"),
+  ymd("1973-11-01"), ymd("1975-03-01"),
+  ymd("1980-01-01"), ymd("1980-07-01"),
+  ymd("1981-07-01"), ymd("1982-11-01"),
+  ymd("1990-07-01"), ymd("1991-03-01"),
+  ymd("2001-03-01"), ymd("2001-11-01"),
+  ymd("2007-12-01"), ymd("2009-06-01"),
+  ymd("2020-03-01"), ymd("2020-10-01")
+)
+
+```
+
+```{r}
+
+recession_shade <- 
+  geom_rect(data = recessions_tribble, 
+            inherit.aes = F, 
+            aes(xmin = Peak, 
+                xmax = Trough, 
+                ymin = -Inf, 
+                ymax = +Inf), 
+            fill = 'grey', 
+            alpha = 0.4)
+
+
+```
+
+## Combine all the portfolio returns data together 
+
+```{r}
+
+# Combine fundamental portfolios with market portfolios
+
+monthly_ret_all_portfolios <-
+  
+inner_join(monthly_ret_funda_portfolios, monthly_ret_market_portfolios, by = c("date" = "date"))
+
+```
+
+```{r}
+
+# Combine other return data 
+
+monthly_ret_all_portfolios <-
+
+ff_factors_data_reduced %>%
+  mutate(mkt = mkt_rf + rf) %>%
+  select(-mkt_rf) %>%
+  left_join(monthly_ret_all_portfolios, ., by = c("date" = "date"))
+
+```
+
+
+```{r}
+
+# Combine with vwretd data
+
+monthly_ret_all_portfolios <-
+  
+msf %>%
+  ungroup() %>%
+  select(date, vwretd) %>%
+  na.omit() %>%
+  arrange(date) %>%
+  distinct() %>%
+  mutate(vwretd = lag(vwretd)) %>%
+  filter(date >= ymd("1972-01-01")) %>%
+  left_join(monthly_ret_all_portfolios, ., by = c("date" = "date"))
+
+```
+
+## Functions to draw plot 
+
+```{r}
+
+plot_vs_vwretd <- function(col_name, portfolio_name)
+{
+  plot <-
+monthly_ret_all_portfolios %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes_string(y = col_name), colour = "darkblue", lwd = 0.1) +
+  geom_line(aes(y = vwretd, colour = "vwretd"), lwd = 0.1) + 
+  scale_color_manual(name = "Return %", values = c("portfolio" = "darkblue", "vwretd" = "burlywood")) +
+  recession_shade +
+  theme_minimal() +
+  labs(title = "Monthly Portfolio Returns vs. VWRETD with Recession Shading",
+       subtitle = portfolio_name,
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_x_date(limits = c(ymd("1971-01-01"), Sys.Date()))
+  
+  return (plot)
+}
+
+plot_vs_mkt <- function(col_name, portfolio_name)
+{
+monthly_ret_all_portfolios %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes_string(y = col_name), colour = "darkblue", lwd = 0.1) +
+  geom_line(aes(y = mkt, colour = "mkt"), lwd = 0.1) + 
+  scale_color_manual(name = "Return %", values = c("portfolio" = "darkblue", "mkt" = "pink")) +
+  recession_shade +
+  theme_minimal() +
+  labs(title = "Monthly Portfolio Returns vs. MKT(Fama-French) with Recession Shading",
+       subtitle = portfolio_name,
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_x_date(limits = c(ymd("1971-01-01"), Sys.Date()))
+}
+
+
+plot_vs_smb <- function(col_name, portfolio_name)
+{
+monthly_ret_all_portfolios %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes_string(y = col_name), colour = "darkblue", lwd = 0.1) +
+  geom_line(aes(y = smb, colour = "smb"), lwd = 0.1) + 
+  scale_color_manual(name = "Return %", values = c("portfolio" = "darkblue", "smb" = "orange")) +
+  recession_shade +
+  theme_minimal() +
+  labs(title = "Monthly Portfolio Returns vs. SMB(Fama-French) with Recession Shading",
+       subtitle = portfolio_name,
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_x_date(limits = c(ymd("1971-01-01"), Sys.Date()))
+}
+
+
+plot_vs_hml <- function(col_name, portfolio_name)
+{
+monthly_ret_all_portfolios %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes_string(y = col_name), colour = "darkblue", lwd = 0.1) +
+  geom_line(aes(y = hml, colour = "hml"), lwd = 0.1) +
+  scale_color_manual(name = "Return %", values = c("portfolio" = "darkblue", "hml" = "yellow")) +
+  recession_shade +
+  theme_minimal() +
+  labs(title = "Monthly Portfolio Returns vs. HML(Fama-French) with Recession Shading",
+       subtitle = portfolio_name,
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_x_date(limits = c(ymd("1971-01-01"), Sys.Date()))
+}
+
+```
+
+## Draw plots for portfolios
+
+```{r, message=FALSE, warning=FALSE}
+
+columns <-
+monthly_ret_all_portfolios %>%
+  select(bk_wt_ret:beta_24m_wt_ret) %>%
+  colnames()
+
+portfolio_names <-
+  list("Book Value Weighted", "Cash Flow Weighted", "Revenue Weighted", "Sales Weighted", "Dividend Weighted",
+       "Investment Weighted", "Profitability Weighted", "Asset Turnover Weighted", "Altman_Z Weighted", 
+       "Ohlson_O Weighted", "Volatility Weighted", "Volatility Weighted (mean = 0)", "Beta Weighted")
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+for (i in 1:13)
+{
+  print(plot_vs_vwretd(columns[i], portfolio_names[i]))
+  print(plot_vs_mkt(columns[i], portfolio_names[i]))
+  print(plot_vs_smb(columns[i], portfolio_names[i]))
+  print(plot_vs_hml(columns[i], portfolio_names[i]))
+}
+
+```
+
+## Calculate statistics for portfolios
+
+```{r}
+
+ monthly_ret_all_portfolios %>%
+    summarise(across(bk_wt_ret:beta_24m_wt_ret, 
+                   list(
+                        "_mean_ret" = ~mean(., na.rm = TRUE), 
+                        "_mean_ret_vwretd" = ~mean(. - vwretd, na.rm = TRUE), 
+                        "_sd" = ~sd(., na.rm = TRUE),
+                        "_skew" = ~skewness(., na.rm = TRUE),
+                        "_kurt" = ~kurtosis(., na.rm = TRUE),
+                        "_sharpe" = ~mean(. - rf, na.rm = TRUE) / sd(., na.rm = TRUE),
+                        "_anual_sharpe" = ~mean(. - rf, na.rm = TRUE) / sd(., na.rm = TRUE) * sqrt(12),
+                        "_ir" = ~mean(. - vwretd, na.rm = TRUE) / sd(. - vwretd, na.rm = TRUE)
+                        ))) %>%
+    
+    pivot_longer(cols = everything(), names_to = c("var", ".value"), names_sep = "__") %>% 
+    
+    arrange(var) %>%
+  
+    gt(rowname_col = "var") %>%
+    
+    tab_header(title = "Monthly Portfolio Performance",
+               subtitle = "mean, sd, skewness, kurtosis, Sharpe, Informatio Ratio") %>%
+           
+    cols_align(align = "center", columns = everything()) %>%
+    
+    fmt_number(columns = mean_ret:ir, decimals = 2) %>%
+    
+    tab_options(
+    column_labels.border.bottom.color = "black",
+    column_labels.border.bottom.width= px(3),
+    column_labels.border.top.color = "black",
+    column_labels.border.top.width= px(3),
+    
+    row_group.border.top.style = NULL,
+    row_group.border.top.width = px(3),
+    row_group.border.top.color = "black",
+    row_group.border.bottom.style = NULL,
+    row_group.border.bottom.width = px(3),
+    row_group.border.bottom.color = "black"
+
+    )
+
+```
