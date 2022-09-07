@@ -1,0 +1,846 @@
+---
+title: "MGT 6090 Assignment 8"
+author: "Yuguang Shen"
+date: "October 25, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(tidyquant)
+library(lubridate)
+library(janitor)
+library(data.table)
+library(gt)
+library(slider)
+library(zoo)
+library(broom)
+library(corrplot)
+library(scales)
+
+```
+
+# Random 10 years and 250 firms
+
+## Random year
+
+seed = 903679462
+random_year = 2010
+
+The time period of this project will be 2010-2019
+
+```{r}
+
+set.seed(903679462)
+
+random_year <- 
+  sample(1980:2010, size = 1)
+
+```
+
+## 250 firms
+
+The first trading day of 2010 is 20100104
+
+```{r}
+
+# Create a pool of firms as of 2010-01-04
+
+firm_pool <-
+  
+fread("dsf_new.csv", select = c("DATE", "PERMNO")) %>%
+  clean_names() %>%
+  filter(date == 20100104) %>%
+  select(permno)
+  
+```
+
+```{r}
+
+# Choose 250 firms from the pool
+
+set.seed(903679462)
+
+chosen_firms <-
+  
+firm_pool[sample(nrow(firm_pool), 250), ]
+
+```
+
+## Import data from DSF dataset
+
+```{r, message=FALSE, warning=FALSE}
+
+# Import DSF data
+
+dsf_hw8 <-
+
+fread("dsf_new.csv", select = c("DATE", "PERMNO", "RET", "VWRETD")) %>%
+  clean_names() %>%
+  filter((date >= 20100101 & date <= 20191231) & permno %in% chosen_firms$permno) %>%
+  mutate(ret = as.numeric(ret)) %>%
+  na.omit()
+
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# Import F-F daily risk-free rate
+
+my_url <- "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip"
+
+my_file <- tempfile()
+
+download.file(my_url, my_file)
+
+ff_daliy_rf <- 
+  read_csv(unzip(my_file), skip = 4) %>%
+  clean_names() %>%
+  rename("date" = "x1") %>%
+  mutate(rf = rf / 100) %>% 
+  select(date, rf) %>%
+  filter(date >= 20100101 & date <= 20191231)
+
+```
+
+```{r}
+
+# Combine DSF data with daily risk-free rate
+
+dsf_hw8 <-
+  
+left_join(dsf_hw8, ff_daliy_rf, by = c("date" = "date"))
+
+```
+
+# Semi beta, downside beta, co-skewness and tail risk
+
+## Add features: year_month, ret_rf, mkt_rf, r_tki, f_tk, r_tki_plus, r_tki_minus, f_tk_plus, f_tk_minus
+
+```{r}
+
+# Add more features: year_month, ret_rf, mkt_rf
+
+dsf_hw8 <-
+  
+dsf_hw8 %>%
+  mutate(date = ymd(date),
+         year_month = ceiling_date(date, "months") - 1,
+         ret_rf = ret - rf,
+         mkt_rf = vwretd - rf) %>%
+  relocate(date, .after = permno) %>%
+  relocate(year_month, .after = date)
+
+```
+
+
+```{r}
+
+# Add more features: r_tki, f_tk
+
+dsf_hw8 <-
+
+dsf_hw8 %>%
+  group_by(permno, year_month) %>%
+  mutate( r_tki = ret_rf - mean(ret_rf),
+          f_tk = mkt_rf - mean(mkt_rf))
+
+```
+
+
+```{r}
+
+# Add more features: r_tki_plus, r_tki_minus, f_tk_plus, f_tk_minus
+
+dsf_hw8 <-
+
+dsf_hw8 %>%
+  mutate(r_tki_plus = case_when(r_tki > 0 ~ r_tki,
+                                TRUE ~ 0),
+         r_tki_minus = case_when(r_tki < 0 ~ r_tki,
+                                 TRUE ~ 0),
+         f_tk_plus = case_when(f_tk > 0 ~ f_tk,
+                               TRUE ~ 0),
+         f_tk_minus = case_when(f_tk < 0 ~ f_tk,
+                                TRUE ~ 0))
+  
+```
+
+
+## Calculate beta, co_skewness and co_kurtosis
+
+```{r, message=FALSE, warning=FALSE}
+
+betas_skew_kurt <-
+
+dsf_hw8 %>%
+  group_by(permno, year_month) %>%
+  summarise(beta_N = sum(r_tki_minus * f_tk_minus) / sum(f_tk * f_tk),
+            beta_P = sum(r_tki_plus * f_tk_plus) / sum(f_tk * f_tk),
+            beta_M_minus = - sum(r_tki_plus * f_tk_minus) / sum(f_tk * f_tk),
+            beta_M_plus = - sum(r_tki_minus * f_tk_plus) / sum(f_tk * f_tk),
+            beta = sum(r_tki * f_tk) / sum(f_tk * f_tk),
+            beta_sum = beta_N + beta_P - beta_M_plus - beta_M_minus,
+            beta_down = sum(r_tki * f_tk_minus) / sum(f_tk_minus * f_tk_minus),
+            beta_up = sum(r_tki * f_tk_plus) / sum(f_tk_plus * f_tk_plus),
+            m = n(),
+            co_skew = (sum(r_tki * f_tk * f_tk) / m) / (sqrt(sum(r_tki*r_tki) / m) * (sum(f_tk*f_tk) / m)),
+            co_kurt = (sum(r_tki * (f_tk^3)) / m) / sqrt(sum(r_tki^2) / m * (sum(f_tk^2) / m)^3)) %>%
+  na.omit()
+
+```
+
+## Analyze returns based on downside beta, upside beta, coskewness, and cokurtosis
+
+Every time tocks are divided into four portfolios, each of which is equaly weighted, according to 25th, 50th, and 75th percentile rankings of various risk measures. The monthly portfolio returns are ploted. The mean monthly return for each portfolio is calculated and then annulized. 
+
+```{r}
+
+# Rank the stocks based on downside beta, upside beta, coskewness, and cokurtosis
+
+ranks <-
+betas_skew_kurt %>%
+  ungroup() %>%
+  select(permno, year_month, beta_down, beta_up, co_skew, co_kurt) %>%
+  group_by(year_month) %>%
+  mutate(beta_down_rank = case_when(beta_down <= quantile(cur_data()$beta_down, 0.25) ~ 1,
+                                    beta_down <= quantile(cur_data()$beta_down, 0.5) & 
+                                    beta_down > quantile(cur_data()$beta_down, 0.25) ~ 2,
+                                    beta_down <= quantile(cur_data()$beta_down, 0.75) & 
+                                      beta_down > quantile(cur_data()$beta_down, 0.5) ~ 3,
+                                    TRUE ~ 4),
+         beta_up_rank = case_when(beta_up <= quantile(cur_data()$beta_up, 0.25) ~ 1,
+                                    beta_up <= quantile(cur_data()$beta_up, 0.5) & 
+                                    beta_up > quantile(cur_data()$beta_up, 0.25) ~ 2,
+                                    beta_up <= quantile(cur_data()$beta_up, 0.75) & 
+                                      beta_up > quantile(cur_data()$beta_up, 0.5) ~ 3,
+                                    TRUE ~ 4),
+         co_skew_rank = case_when(co_skew <= quantile(cur_data()$co_skew, 0.25) ~ 1,
+                                    co_skew <= quantile(cur_data()$co_skew, 0.5) & 
+                                    co_skew > quantile(cur_data()$co_skew, 0.25) ~ 2,
+                                    co_skew <= quantile(cur_data()$co_skew, 0.75) & 
+                                      co_skew > quantile(cur_data()$co_skew, 0.5) ~ 3,
+                                    TRUE ~ 4),
+         co_kurt_rank = case_when(co_kurt <= quantile(cur_data()$co_kurt, 0.25) ~ 1,
+                                    co_kurt <= quantile(cur_data()$co_kurt, 0.5) & 
+                                    co_kurt > quantile(cur_data()$co_kurt, 0.25) ~ 2,
+                                    co_kurt <= quantile(cur_data()$co_kurt, 0.75) & 
+                                      co_kurt > quantile(cur_data()$co_kurt, 0.5) ~ 3,
+                                    TRUE ~ 4))
+
+
+```
+
+```{r}
+
+# Combine ranking data with return data
+
+ret_w_rank <-
+dsf_hw8 %>%
+  select(permno : ret) %>%
+  left_join(., ranks %>% select(permno, year_month, beta_down_rank : co_kurt_rank), by = c("permno" = "permno", "year_month" = "year_month")) %>%
+  na.omit()
+
+```
+
+### Based on Downside Beta
+
+```{r, message=FALSE, warning=FALSE}
+
+# Monthly portfolio returns based on downside beta rank
+
+rank_by_down_beta <-
+ret_w_rank %>%
+  select(date, year_month, ret, beta_down_rank) %>%
+  group_by(beta_down_rank, date) %>% 
+  summarise(ret_daily = mean(ret),
+            year_month = year_month) %>%
+  distinct() %>%
+  ungroup() %>%
+  group_by(beta_down_rank, year_month) %>%
+  summarise(ret_monthly_pct = (prod(cur_data()$ret_daily+1) - 1) * 100)
+
+```
+
+```{r}
+
+# Plot monthly return of portfolios based on downside beta rank
+
+rank_by_down_beta %>%
+  ggplot(aes(x = year_month, y = ret_monthly_pct, color = as.character(beta_down_rank))) +
+  geom_line() +
+  labs(title = "Monthly Portfolio Return",
+       subtitle = "Based on Downside Beta Rank", 
+       color = "downside beta rank (1:4 low:high)", 
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_y_continuous(breaks = breaks_pretty(n = 10)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5))
+
+```
+
+```{r}
+
+# Calculate annualized return of portfolio based on downside beta ranking and make a table
+
+rank_by_down_beta %>%
+  ungroup() %>%
+  group_by(beta_down_rank) %>%
+  summarise(annual_ret_pct = mean(ret_monthly_pct) * 12,
+            annual_ret_sd = sd(ret_monthly_pct) * sqrt(12)) %>%
+  gt() %>%
+  tab_header(title = "Annualized Portforlio Return",
+             subtitle = "Based on Downside Beta Ranking") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  fmt_number(columns = c(annual_ret_pct, annual_ret_sd), decimals = 2)
+
+```
+
+### Based on Upside Beta
+
+```{r, message=FALSE, warning=FALSE}
+
+# Monthly portfolio returns based on upside beta rank
+
+rank_by_up_beta <-
+ret_w_rank %>%
+  select(date, year_month, ret, beta_up_rank) %>%
+  group_by(beta_up_rank, date) %>% 
+  summarise(ret_daily = mean(ret),
+            year_month = year_month) %>%
+  distinct() %>%
+  ungroup() %>%
+  group_by(beta_up_rank, year_month) %>%
+  summarise(ret_monthly_pct = (prod(cur_data()$ret_daily+1) - 1) * 100)
+
+```
+
+```{r}
+
+# Plot monthly return of portfolios based on upside beta rank
+
+rank_by_up_beta %>%
+  ggplot(aes(x = year_month, y = ret_monthly_pct, color = as.character(beta_up_rank))) +
+  geom_line() +
+  labs(title = "Monthly Portfolio Return",
+       subtitle = "Based on Upside Beta Rank", 
+       color = "upside beta rank (1:4 low:high)", 
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_y_continuous(breaks = breaks_pretty(n = 10)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5))
+
+```
+
+```{r}
+
+# Calculate annualized return of portfolio based on upside beta ranking and make a table
+
+rank_by_up_beta %>%
+  ungroup() %>%
+  group_by(beta_up_rank) %>%
+  summarise(annual_ret_pct = mean(ret_monthly_pct) * 12,
+            annual_ret_sd = sd(ret_monthly_pct) * sqrt(12)) %>%
+  gt() %>%
+  tab_header(title = "Annualized Portforlio Return",
+             subtitle = "Based on Upside Beta Ranking") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  fmt_number(columns = c(annual_ret_pct, annual_ret_sd), decimals = 2)
+
+```
+
+### Based on Coskewness
+
+```{r, message=FALSE, warning=FALSE}
+
+# Monthly portfolio returns based on coskewness rank
+
+rank_by_co_skew <-
+ret_w_rank %>%
+  select(date, year_month, ret, co_skew_rank) %>%
+  group_by(co_skew_rank, date) %>% 
+  summarise(ret_daily = mean(ret),
+            year_month = year_month) %>%
+  distinct() %>%
+  ungroup() %>%
+  group_by(co_skew_rank, year_month) %>%
+  summarise(ret_monthly_pct = (prod(cur_data()$ret_daily+1) - 1) * 100)
+
+```
+
+```{r}
+
+# Plot monthly return of portfolios based on coskewness rank
+
+rank_by_co_skew %>%
+  ggplot(aes(x = year_month, y = ret_monthly_pct, color = as.character(co_skew_rank))) +
+  geom_line() +
+  labs(title = "Monthly Portfolio Return",
+       subtitle = "Based on Coskewness Rank", 
+       color = "coskewness rank (1:4 low:high)", 
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_y_continuous(breaks = breaks_pretty(n = 10)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5))
+
+```
+
+```{r}
+
+# Calculate annualized return of portfolio based on coskewness ranking and make a table
+
+rank_by_co_skew %>%
+  ungroup() %>%
+  group_by(co_skew_rank) %>%
+  summarise(annual_ret_pct = mean(ret_monthly_pct) * 12,
+            annual_ret_sd = sd(ret_monthly_pct) * sqrt(12)) %>%
+  gt() %>%
+  tab_header(title = "Annualized Portforlio Return",
+             subtitle = "Based on Coskewness Ranking") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  fmt_number(columns = c(annual_ret_pct, annual_ret_sd), decimals = 2)
+
+```
+
+### Based on Cokurtosis 
+
+```{r, message=FALSE, warning=FALSE}
+
+# Monthly portfolio returns based on cokurtosis rank
+
+rank_by_co_kurt <-
+ret_w_rank %>%
+  select(date, year_month, ret, co_kurt_rank) %>%
+  group_by(co_kurt_rank, date) %>% 
+  summarise(ret_daily = mean(ret),
+            year_month = year_month) %>%
+  distinct() %>%
+  ungroup() %>%
+  group_by(co_kurt_rank, year_month) %>%
+  summarise(ret_monthly_pct = (prod(cur_data()$ret_daily+1) - 1) * 100)
+
+```
+
+```{r}
+
+# Plot monthly return of portfolios based on cokurtosis rank
+
+rank_by_co_kurt %>%
+  ggplot(aes(x = year_month, y = ret_monthly_pct, color = as.character(co_kurt_rank))) +
+  geom_line() +
+  labs(title = "Monthly Portfolio Return",
+       subtitle = "Based on Cokurtosis Rank", 
+       color = "cokurtosis rank (1:4 low:high)", 
+       y = "Monthly Returns (%)",
+       x = "") +
+  scale_y_continuous(breaks = breaks_pretty(n = 10)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5))
+
+```
+
+```{r}
+
+# Calculate annualized return of portfolio based on cokurtosis ranking and make a table
+
+rank_by_co_kurt %>%
+  ungroup() %>%
+  group_by(co_kurt_rank) %>%
+  summarise(annual_ret_pct = mean(ret_monthly_pct) * 12,
+            annual_ret_sd = sd(ret_monthly_pct) * sqrt(12)) %>%
+  gt() %>%
+  tab_header(title = "Annualized Portforlio Return",
+             subtitle = "Based on Cokurtosis Ranking") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  fmt_number(columns = c(annual_ret_pct, annual_ret_sd), decimals = 2)
+
+```
+
+
+## Correlation of Beta Measures
+
+```{r}
+
+betas_skew_kurt %>%
+  ungroup() %>%
+  select(-c(permno, year_month, m)) %>%
+  cor() %>%
+  corrplot(method = "pie",
+           title = "Correlation of Beta Measures", 
+           number.cex = 0.6,
+           addCoef.col = 'black', 
+           mar=c(0,0,1,0))
+
+```
+
+# VaR and ES
+
+## From 2010-01-01 to 2019-12-31
+
+```{r}
+
+# Calculate the daily return of this equal-weighted portfolio through this period
+# Some stocks may cease to exist in this period. Check the number of stocks daily and adjust the weight accordingly.
+
+portfolio_return_1 <-
+
+dsf_hw8 %>%
+  ungroup() %>%
+  select(date, permno, ret) %>%
+  group_by(date) %>%
+  summarise(n_stocks = n(),
+            port_ret = sum(ret) / n_stocks)
+
+```
+
+```{r}
+
+# Visualize the daily return of this portfolio
+
+portfolio_return_1 %>%
+  ggplot(aes(port_ret)) +
+  geom_density(color = "steelblue") + 
+  geom_vline(xintercept = quantile(portfolio_return_1$port_ret, probs = 0.05)) +
+  labs(title = "Portfolio one-day 5% VaR from 2010-01-01 to 2019-12-31",
+       x = "portforlio return") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+  
+
+```
+
+
+```{r}
+
+# Find the 5% quantile
+
+var_1 <-
+  quantile(portfolio_return_1$port_ret, probs = 0.05)
+
+dollar_var_1 <- 
+  var_1 * 250
+
+es_1 <- 
+  mean(portfolio_return_1$port_ret[portfolio_return_1$port_ret < var_1])
+
+dollar_es_1 <-
+  es_1 * 250
+
+```
+
+```{r}
+
+# Make a table for VaR and ES result
+
+data.frame(var_1, dollar_var_1, es_1, dollar_es_1) %>%
+  rename("VaR" = "var_1", "Dollar_VaR_mil" = "dollar_var_1", "ES" = "es_1", "Dollar_ES_mil" = "dollar_es_1") %>%
+  gt() %>%
+  tab_header(title = "Portfolio one-day 5% VaR and ES from 2010-01-01 to 2019-12-31 ") %>% 
+  cols_align(align = "center", columns = everything()) %>%
+  fmt_number(columns = everything(), decimals = 4)
+
+```
+
+## From 2000-01-01 to 2010-12-31
+
+```{r, message=FALSE, warning=FALSE}
+
+# Calculate the daily return of this equal weight portfolio.
+# The number of stocks availabe on each day varies.
+
+portfolio_return_2 <-
+
+fread("dsf_new.csv", select = c("DATE", "PERMNO", "RET")) %>%
+  clean_names() %>%
+  filter((date >= 20000101 & date <= 20101231) & permno %in% chosen_firms$permno) %>%
+  mutate(date = ymd(date),
+         ret = as.numeric(ret)) %>%
+  na.omit() %>%
+  group_by(date) %>%
+  summarise(n_stocks = n(),
+            port_ret = sum(ret) / n_stocks)
+
+```
+
+```{r}
+
+# Visualize the daily return of this portfolio
+
+portfolio_return_2 %>%
+  ggplot(aes(port_ret)) +
+  geom_density(color = "steelblue") + 
+  geom_vline(xintercept = quantile(portfolio_return_2$port_ret, probs = 0.05)) +
+  labs(title = "Portfolio one-day 5% VaR from 2000-01-01 to 2010-12-31",
+       x = "portforlio return") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+
+```
+
+```{r}
+
+# Calculate VaR and ES
+
+var_2 <-
+  quantile(portfolio_return_2$port_ret, probs = 0.05)
+
+dollar_var_2 <- 
+  var_2 * 250
+
+es_2 <- 
+  mean(portfolio_return_2$port_ret[portfolio_return_2$port_ret < var_2])
+
+dollar_es_2 <-
+  es_2 * 250
+
+```
+
+```{r}
+
+# Make a table for VaR and ES result
+
+data.frame(var_2, dollar_var_2, es_2, dollar_es_2) %>%
+  rename("VaR" = "var_2", "Dollar_VaR_mil" = "dollar_var_2", "ES" = "es_2", "Dollar_ES_mil" = "dollar_es_2") %>%
+  gt() %>%
+  tab_header(title = "Portfolio one-day 5% VaR and ES from 2000-01-01 to 2010-12-31 ") %>% 
+  cols_align(align = "center", columns = everything()) %>%
+  fmt_number(columns = everything(), decimals = 4)
+
+```
+
+
+# Volatility modeling
+
+## Simple Risk Metrics Model
+
+```{r}
+
+# Calculate annualized variance of 250 chosen stocks
+# Do not annualize
+
+initial_variance <-
+
+dsf_hw8 %>%
+  ungroup() %>%
+  select(permno, ret) %>%
+  group_by(permno) %>%
+  summarise(variance = var(ret))
+
+initial_variance %>%
+  ungroup() %>%
+  gt() %>%
+  tab_header(title = "Initial Variance for Each Firm") %>%
+  cols_align(align = "center", columns = everything()) 
+
+```
+
+```{r}
+
+# Randomly choose 5 stocks from 250 chosen stocks
+
+set.seed(903679462)
+
+five_firms <-
+  
+chosen_firms[sample(nrow(chosen_firms), 5), ]
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# Import return data for these 5 firms from 2000-01-01 to 2010-12-31
+
+return_five_firms <-
+
+fread("dsf_new.csv", select = c("DATE", "PERMNO", "RET")) %>%
+  clean_names() %>%
+  filter((date >= 20000101 & date <= 20101231) & permno %in% five_firms$permno) %>%
+  mutate(ret = as.numeric(ret)) %>%
+  na.omit()
+
+```
+
+
+```{r}
+
+# Add initial variance to each of the 5 firms
+
+return_five_firms <-
+
+left_join(return_five_firms[, .SD[1], by = permno], initial_variance[initial_variance$permno %in% five_firms$permno, ], by = c("permno" = "permno")) %>%
+  left_join(return_five_firms, ., by = c("permno" = "permno", "date" = "date", "ret" = "ret"))
+
+```
+
+```{r}
+
+# Apply the recursive formula to calculate variance according to the variance of previous day
+
+for (i in 2:nrow(return_five_firms))
+{
+   return_five_firms$variance[i] = if_else (is.na(return_five_firms$variance[i]), 0.94 * return_five_firms$variance[i-1] + 0.06 * (return_five_firms$ret[i-1])^2,
+                                 return_five_firms$variance[i])
+}
+
+```
+
+```{r}
+
+# Plot the time series of variance by JP Morgan's Risk Metrics for each of the 5 firms
+
+return_five_firms %>%
+  mutate(date = ymd(date)) %>%
+  group_by(date, permno) %>%
+  ggplot(aes(x = date, y = variance)) +
+  geom_line() +
+  facet_wrap(~ permno, scales = "free", nrow = 3, ncol = 3) +
+  labs(title = "Variance by JP Morgan's Risk Metrics") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+```
+
+## GARCH
+
+```{r}
+
+# Calculate historical variance of rolling 25-day window for all 250 firms
+
+initial_variance_garch <-
+  
+  dsf_hw8 %>%
+  ungroup() %>%
+  select(permno, ret) %>%
+  group_by(permno) %>%
+  mutate(variance_25 = rollapply(cur_data(), 25, FUN = var, align = "right", partial = FALSE, fill = NA),
+         variance_25_lag = lag(variance_25, 1))
+
+```
+
+```{r}
+
+# Use linear regression to get omega, beta, and alpha for each firm
+
+garch_coef <-
+
+initial_variance_garch %>%
+  group_by(permno) %>%
+  na.omit() %>%
+  nest() %>%
+  mutate(models = map(data, ~ lm(variance_25 ~ variance_25_lag + ret, data = .x)),
+         tidied = map(models, tidy)
+         ) %>%
+  unnest(tidied) %>%
+  select(permno, term, estimate) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  rename("omega" = "(Intercept)", "beta" = "variance_25_lag", "alpha" = "ret")
+
+garch_coef %>%
+  ungroup() %>%
+  gt() %>%
+  tab_header(title = "GARCH (1,1) Model Parameters for Each Firm") %>%
+  cols_align(align = "center", columns = everything()) 
+  
+```
+
+```{r}
+
+# Get GARCH model coefficients for the five firms
+
+garch_coef_five_firms <-
+  garch_coef %>%
+  filter(permno %in% five_firms$permno)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# Import return data for these 5 firms from 2000-01-01 to 2010-12-31
+
+return_five_firms_garch <-
+
+fread("dsf_new.csv", select = c("DATE", "PERMNO", "RET")) %>%
+  clean_names() %>%
+  filter((date >= 20000101 & date <= 20101231) & permno %in% garch_coef_five_firms$permno) %>%
+  mutate(ret = as.numeric(ret)) %>%
+  na.omit()
+
+
+```
+
+
+```{r}
+
+# Add initial variance to each of the 5 firms
+
+return_five_firms_garch <-
+
+left_join(return_five_firms_garch[, .SD[1], by = permno], initial_variance[initial_variance$permno %in% garch_coef_five_firms$permno, ], by = c("permno" = "permno")) %>%
+  left_join(return_five_firms_garch, ., by = c("permno" = "permno", "date" = "date", "ret" = "ret"))
+
+```
+
+
+```{r}
+
+return_five_firms_garch <-
+  left_join(return_five_firms_garch, garch_coef_five_firms, by = c("permno" = "permno"))
+
+```
+
+
+```{r}
+
+# Apply the GARCH recursive formula to calculate variance according to the variance of previous day
+
+for (i in 2:nrow(return_five_firms_garch))
+{
+   return_five_firms_garch$variance[i] = if_else (is.na(return_five_firms_garch$variance[i]), return_five_firms_garch$omega[i] +  return_five_firms_garch$beta[i] * return_five_firms_garch$variance[i-1] + return_five_firms_garch$alpha[i] * (return_five_firms_garch$ret[i-1])^2,
+                                 return_five_firms_garch$variance[i])
+}
+
+```
+
+Note: The variances used to estimate GARCH parameters are generated by calculating historical variance of rolling 25-day window from 2010 to 2019. However, for stock whose permno is 83664, it had less than 25 trading days in 2010 and ceased to exist. Therefore, there are no historical variances that can be used to estimate GARCH parameters for this stock. Unfortunately, it is one of the five stocks selected by my random seed.
+
+Therefore, the following part only plots 4 stocks, instead of 5.
+
+```{r}
+
+# Plot the time series of variance generated by GARCH(1, 1) for each of the 5 firms
+
+return_five_firms_garch %>%
+  mutate(date = ymd(date)) %>%
+  group_by(date, permno) %>%
+  ggplot(aes(x = date, y = variance)) +
+  geom_line() +
+  facet_wrap(~ permno, scales = "free", nrow = 2, ncol = 2) +
+  labs(title = "Variance by GARCH(1, 1)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = .5))
+
+```
+
+
+
+
+
+
+
+
